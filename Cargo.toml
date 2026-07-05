@@ -1,0 +1,9 @@
+[package]
+name = "rshot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+xcap = "0.9.6"
+arboard = "3.6.1"
+mouse_position = "0.1.4"
