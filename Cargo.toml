@@ -9,3 +9,10 @@ arboard = "3.6.1"
 mouse_position = "0.1.4"
 global-hotkey = "0.8.0"
 windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+serde = "1.0.228"
+
+
+[dependencies.confy]
+version = "2.0.0"           # ← 补上,填你 cargo add 装到的版本
+features = ["yaml_conf"]
+default-features = false
