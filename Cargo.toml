@@ -8,8 +8,11 @@ xcap = "0.9.6"
 arboard = "3.6.1"
 mouse_position = "0.1.4"
 global-hotkey = "0.8.0"
-windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_HiDpi", "Win32_Graphics_Dwm"] }
 serde = "1.0.228"
+winit = "0.31.0-beta.2"
+softbuffer = "0.4.8"
+tray-icon = "0.19"
 
 
 [dependencies.confy]
