@@ -20,9 +20,9 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetWindowRect, IsIconic, IsWindowVisible,
+    EnumWindows, GetCursorPos, GetWindowRect, IsIconic, IsWindowVisible, MB_ICONERROR, MessageBoxW,
 };
-use windows::core::BOOL;
+use windows::core::{BOOL, HSTRING, PCWSTR};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -438,7 +438,18 @@ fn crop_to_clipboard(img: &RgbaImage, a: (i32, i32), b: (i32, i32)) {
         .unwrap();
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() {
+    // release 版没控制台，启动出错会闷声退出；这里把错误弹窗告诉用户
+    if let Err(e) = run() {
+        let text = HSTRING::from(format!("rshot 启动失败：\n{e}"));
+        let caption = HSTRING::from("rshot");
+        unsafe {
+            MessageBoxW(None, PCWSTR(text.as_ptr()), PCWSTR(caption.as_ptr()), MB_ICONERROR);
+        }
+    }
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
     // 最开头声明进程为 per-monitor-v2 DPI aware，赶在 EventLoop 和任何截图之前。
     // 否则高 DPI 屏上 winit 报逻辑尺寸、xcap 截物理尺寸，两者不一致会导致画面斜切。
     unsafe {
