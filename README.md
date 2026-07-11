@@ -4,6 +4,8 @@
 
 > 边学 Rust 边做的自用项目。
 
+**[⬇ 下载最新版 rshot.exe](https://github.com/idkwhatimdoing62/rshot/releases/latest/download/rshot.exe)** —— 双击即用，无需装 Rust。
+
 ## 功能
 
 - **冻屏框选**：按热键后画面定格，拖出矩形选区，回车截取。
