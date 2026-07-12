@@ -2,7 +2,6 @@
 // debug（cargo run）保留控制台，方便看 println!/panic。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use arboard::{Clipboard, ImageData};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use serde::{Deserialize, Serialize};
 use softbuffer::{Context, Surface};
@@ -15,10 +14,16 @@ use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
+use windows::Win32::System::Memory::{GHND, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Ole::{CF_DIB, CF_HDROP};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
+use windows::Win32::UI::Shell::DROPFILES;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetCursorPos, GetWindowRect, IsIconic, IsWindowVisible, MB_ICONERROR, MessageBoxW,
 };
@@ -215,7 +220,7 @@ impl ApplicationHandler for App {
                                 // 只有手动拖出的框才裁；悬停锁定的窗口不算，回车=全屏（窗口截图靠单击）
                                 match self.sel {
                                     Some((a, b)) if self.manual => crop_to_clipboard(&img, a, b),
-                                    _ => full_to_clipboard(img),
+                                    _ => image_to_clipboard(&img),
                                 }
                             }
                             self.close_overlay();
@@ -414,20 +419,7 @@ fn make_icon() -> Icon {
     Icon::from_rgba(px, N as u32, N as u32).unwrap()
 }
 
-/// 整张图进剪贴板：消耗 img，用 into_raw 零拷贝搬走字节。
-fn full_to_clipboard(img: RgbaImage) {
-    let (w, h) = (img.width() as usize, img.height() as usize);
-    let mut clipboard = Clipboard::new().unwrap();
-    clipboard
-        .set_image(ImageData {
-            width: w,
-            height: h,
-            bytes: img.into_raw().into(),
-        })
-        .unwrap();
-}
-
-/// 按对角两点 a、b 从原图裁出子矩形，塞进剪贴板。零尺寸就跳过。
+/// 按对角两点 a、b 从原图裁出子矩形，进剪贴板。零尺寸就跳过。
 fn crop_to_clipboard(img: &RgbaImage, a: (i32, i32), b: (i32, i32)) {
     let (iw, ih) = (img.width() as i32, img.height() as i32);
     let left = a.0.min(b.0).clamp(0, iw);
@@ -439,14 +431,125 @@ fn crop_to_clipboard(img: &RgbaImage, a: (i32, i32), b: (i32, i32)) {
         return;
     }
     let cropped = imageops::crop_imm(img, left as u32, top as u32, bw, bh).to_image();
-    let mut clipboard = Clipboard::new().unwrap();
-    clipboard
-        .set_image(ImageData {
-            width: bw as usize,
-            height: bh as usize,
-            bytes: cropped.into_raw().into(),
-        })
-        .unwrap();
+    image_to_clipboard(&cropped);
+}
+
+/// 把截图放进剪贴板，同时挂两种格式：
+/// - CF_DIB 位图：微信/Word/画图 等能贴图的程序直接粘。
+/// - CF_HDROP 文件：把图另存成临时 png，终端/资源管理器粘到的是这个文件路径。
+fn image_to_clipboard(img: &RgbaImage) {
+    let dib = build_dib(img);
+    // 存一份临时 png，好让只认文件的地方（命令行）也能粘到路径
+    let png_path = std::env::temp_dir().join("rshot.png");
+    let hdrop = img.save(&png_path).ok().map(|_| build_hdrop(&png_path));
+
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return;
+        }
+        let _ = EmptyClipboard();
+        if let Some(h) = global_from_bytes(&dib) {
+            let _ = SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(h.0)));
+        }
+        if let Some(bytes) = hdrop {
+            if let Some(h) = global_from_bytes(&bytes) {
+                let _ = SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(h.0)));
+            }
+        }
+        let _ = CloseClipboard();
+    }
+}
+
+/// 组一个 24 位 BI_RGB 的 DIB：40 字节 BITMAPINFOHEADER + 自底向上、每行补齐 4 字节的 BGR 像素。
+fn build_dib(img: &RgbaImage) -> Vec<u8> {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let stride = (w * 3 + 3) & !3; // 每行补齐到 4 字节边界（DIB 要求）
+    let mut out = Vec::with_capacity(40 + stride * h);
+    out.extend_from_slice(&40u32.to_le_bytes()); // biSize
+    out.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth
+    out.extend_from_slice(&(h as i32).to_le_bytes()); // biHeight 正=自底向上
+    out.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+    out.extend_from_slice(&24u16.to_le_bytes()); // biBitCount
+    out.extend_from_slice(&0u32.to_le_bytes()); // biCompression = BI_RGB
+    out.extend_from_slice(&((stride * h) as u32).to_le_bytes()); // biSizeImage
+    out.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerMeter
+    out.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerMeter
+    out.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
+    out.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
+    for y in (0..h).rev() {
+        let mut row = 0usize;
+        for x in 0..w {
+            let px = img.get_pixel(x as u32, y as u32).0;
+            out.push(px[2]); // B
+            out.push(px[1]); // G
+            out.push(px[0]); // R
+            row += 3;
+        }
+        while row < stride {
+            out.push(0); // 行尾补齐
+            row += 1;
+        }
+    }
+    out
+}
+
+/// 组一个 CF_HDROP 数据块：DROPFILES 头 + 宽字符路径 + 双 null 结尾。
+fn build_hdrop(path: &std::path::Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    let df = DROPFILES {
+        pFiles: std::mem::size_of::<DROPFILES>() as u32, // 路径列表相对本头的偏移
+        pt: POINT { x: 0, y: 0 },
+        fNC: BOOL(0),
+        fWide: BOOL(1), // 宽字符路径
+    };
+    let head = unsafe {
+        std::slice::from_raw_parts(
+            (&df as *const DROPFILES) as *const u8,
+            std::mem::size_of::<DROPFILES>(),
+        )
+    };
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0); // 路径结尾
+    wide.push(0); // 列表结尾（双 null）
+    let mut out = Vec::with_capacity(head.len() + wide.len() * 2);
+    out.extend_from_slice(head);
+    for u in wide {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+    out
+}
+
+/// 把字节拷进一块可移动全局内存，交给剪贴板（SetClipboardData 成功后由系统接管，不能再释放）。
+unsafe fn global_from_bytes(data: &[u8]) -> Option<HGLOBAL> {
+    unsafe {
+        let h = GlobalAlloc(GHND, data.len()).ok()?;
+        let p = GlobalLock(h);
+        if p.is_null() {
+            return None;
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, data.len());
+        let _ = GlobalUnlock(h);
+        Some(h)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_dib;
+    use xcap::image::RgbaImage;
+
+    #[test]
+    fn dib_header_and_bgr() {
+        // 2×1，一红一绿；stride = (2*3+3)&!3 = 8，总长 40+8 = 48
+        let img = RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+        let d = build_dib(&img);
+        assert_eq!(d.len(), 48);
+        assert_eq!(&d[0..4], &40u32.to_le_bytes()); // biSize
+        assert_eq!(&d[4..8], &2i32.to_le_bytes()); // biWidth
+        assert_eq!(d[14], 24); // biBitCount 低字节
+        // 像素段：红 → B,G,R = 0,0,255；绿 → 0,255,0
+        assert_eq!(&d[40..46], &[0, 0, 255, 0, 255, 0]);
+    }
 }
 
 fn main() {
