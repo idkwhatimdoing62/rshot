@@ -212,9 +212,10 @@ impl ApplicationHandler for App {
                                 if let Some(w) = &self.window {
                                     w.set_visible(false); // 先藏，编码耗时挪到看不见后
                                 }
+                                // 只有手动拖出的框才裁；悬停锁定的窗口不算，回车=全屏（窗口截图靠单击）
                                 match self.sel {
-                                    Some((a, b)) => crop_to_clipboard(&img, a, b),
-                                    None => full_to_clipboard(img),
+                                    Some((a, b)) if self.manual => crop_to_clipboard(&img, a, b),
+                                    _ => full_to_clipboard(img),
                                 }
                             }
                             self.close_overlay();
