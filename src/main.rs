@@ -66,6 +66,7 @@ struct App {
     windows: Vec<RECT>, // 开遮罩前拍下的所有窗口矩形（屏幕坐标，Z 序，顶层在前）
     origin: (i32, i32), // 遮罩所在屏的左上角屏幕坐标，做窗口↔屏幕坐标换算
     dragged: bool,      // 本次按下后是否已构成拖拽（区分单击 vs 拖框）
+    manual: bool,       // 已手动拖出选框、待回车确认。true 时停掉悬停锁定，别把框冲掉
 }
 
 impl App {
@@ -145,6 +146,7 @@ impl App {
         self.sel = None;
         self.windows = Vec::new();
         self.dragged = false;
+        self.manual = false;
     }
 
     /// 光标当前所在的窗口矩形（转成窗口内坐标）。没命中返回 None
@@ -232,8 +234,12 @@ impl ApplicationHandler for App {
                             self.sel = Some((anchor, self.cur));
                         }
                     }
-                    // 没按住：悬停锁定光标下的窗口
-                    None => self.sel = self.window_under_cursor(),
+                    // 没按住：悬停锁定光标下的窗口。但已手动拖过框就别再冲掉它
+                    None => {
+                        if !self.manual {
+                            self.sel = self.window_under_cursor();
+                        }
+                    }
                 }
                 // 选框变了才重画，省得原地不动也刷屏
                 if self.sel != before {
@@ -249,6 +255,7 @@ impl ApplicationHandler for App {
                             // 按下先记锚点；sel 保持（可能是悬停锁定的窗口），供单击截取
                             self.start = Some(self.cur);
                             self.dragged = false;
+                            self.manual = false; // 重新开框，解除上次的手动锁定
                         }
                         ElementState::Released => {
                             let was_drag = self.dragged;
@@ -266,7 +273,10 @@ impl ApplicationHandler for App {
                                     self.close_overlay();
                                 }
                             }
-                            // 拖框的话：sel 已是手动框，等回车确认
+                            // 拖框的话：sel 已是手动框，锁住它等回车确认，别被悬停冲掉
+                            else {
+                                self.manual = true;
+                            }
                         }
                     }
                 }
