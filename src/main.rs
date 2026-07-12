@@ -71,7 +71,7 @@ struct App {
     windows: Vec<RECT>, // 开遮罩前拍下的所有窗口矩形（屏幕坐标，Z 序，顶层在前）
     origin: (i32, i32), // 遮罩所在屏的左上角屏幕坐标，做窗口↔屏幕坐标换算
     dragged: bool,      // 本次按下后是否已构成拖拽（区分单击 vs 拖框）
-    manual: bool,       // 已手动拖出选框、待回车确认。true 时停掉悬停锁定，别把框冲掉
+    manual: bool,       // 已手动拖出选框、待右击确认。true 时停掉悬停锁定，别把框冲掉
 }
 
 impl App {
@@ -141,6 +141,21 @@ impl App {
         self.surface = Some(surface);
     }
 
+    /// 确认截图：手动拖出的框裁框，否则截整屏。截完进剪贴板并收起遮罩。
+    fn confirm(&mut self) {
+        if let Some(img) = self.img.take() {
+            if let Some(w) = &self.window {
+                w.set_visible(false); // 先藏，编码耗时挪到看不见后
+            }
+            // 只有手动拖出的框才裁；悬停锁定的窗口不算，无框=全屏（窗口截图靠单击）
+            match self.sel {
+                Some((a, b)) if self.manual => crop_to_clipboard(&img, a, b),
+                _ => image_to_clipboard(&img),
+            }
+        }
+        self.close_overlay();
+    }
+
     /// 关掉遮罩窗口，回后台待命（不退程序）。丢掉所有 Rc，窗口即被销毁
     fn close_overlay(&mut self) {
         self.window = None;
@@ -208,24 +223,9 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => self.close_overlay(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
-                    match event.logical_key {
-                        // ESC：取消，不截图
-                        Key::Named(NamedKey::Escape) => self.close_overlay(),
-                        // 回车：确认。有框裁框，没框截整张（全屏）
-                        Key::Named(NamedKey::Enter) => {
-                            if let Some(img) = self.img.take() {
-                                if let Some(w) = &self.window {
-                                    w.set_visible(false); // 先藏，编码耗时挪到看不见后
-                                }
-                                // 只有手动拖出的框才裁；悬停锁定的窗口不算，回车=全屏（窗口截图靠单击）
-                                match self.sel {
-                                    Some((a, b)) if self.manual => crop_to_clipboard(&img, a, b),
-                                    _ => image_to_clipboard(&img),
-                                }
-                            }
-                            self.close_overlay();
-                        }
-                        _ => {}
+                    // ESC：取消，不截图
+                    if let Key::Named(NamedKey::Escape) = event.logical_key {
+                        self.close_overlay();
                     }
                 }
             }
@@ -255,7 +255,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::PointerButton { state, button, .. } => {
-                if button.mouse_button() == Some(MouseButton::Left) {
+                let mb = button.mouse_button();
+                // 右键抬起 = 确认（有手动框裁框，否则全屏）。
+                // 必须等抬起：若按下就关遮罩，抬起那半下会漏给下面窗口，触发系统右键菜单
+                if mb == Some(MouseButton::Right) && state == ElementState::Released {
+                    self.confirm();
+                } else if mb == Some(MouseButton::Left) {
                     match state {
                         ElementState::Pressed => {
                             // 按下先记锚点；sel 保持（可能是悬停锁定的窗口），供单击截取
@@ -279,7 +284,7 @@ impl ApplicationHandler for App {
                                     self.close_overlay();
                                 }
                             }
-                            // 拖框的话：sel 已是手动框，锁住它等回车确认，别被悬停冲掉
+                            // 拖框的话：sel 已是手动框，锁住它等右击确认，别被悬停冲掉
                             else {
                                 self.manual = true;
                             }
