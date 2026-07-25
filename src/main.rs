@@ -11,7 +11,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
-use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
@@ -69,7 +69,6 @@ struct App {
     // —— 以下是遮罩窗口的状态，只有正在框选时才有值 ——
     window: Option<Rc<dyn Window>>,
     surface: Option<Surface<Rc<dyn Window>, Rc<dyn Window>>>,
-    shot: Vec<u32>,         // 冻屏像素（0RGB，显示用）
     img: Option<RgbaImage>, // 原始截图（裁剪用，保留 RGBA）
     cursor: (i32, i32),
     start: Option<(i32, i32)>,             // 拖动中的锚点
@@ -110,13 +109,6 @@ impl App {
         let Ok(img) = monitor.capture_image() else {
             return;
         };
-        self.shot = img
-            .pixels()
-            .map(|px| {
-                let [r, g, b, _a] = px.0;
-                (r as u32) << 16 | (g as u32) << 8 | b as u32
-            })
-            .collect();
         self.img = Some(img);
         self.start = None; // 每次开都重置框选
         self.sel = None;
@@ -173,11 +165,18 @@ impl App {
 
     /// 确认截图：手动拖出的框裁框，否则截整屏。截完进剪贴板并收起遮罩。
     fn confirm(&mut self) {
-        if let Some(img) = self.output_image() {
+        if self.img.is_some() {
             if let Some(w) = &self.window {
                 w.set_visible(false); // 先藏，编码耗时挪到看不见后
             }
-            image_to_clipboard(&img);
+            if self.sel.is_none() && self.strokes.is_empty() {
+                // 全屏且没有标注时直接使用原图，避免再克隆一份整屏 RGBA。
+                if let Some(img) = self.img.as_ref() {
+                    image_to_clipboard(img);
+                }
+            } else if let Some(img) = self.output_image() {
+                image_to_clipboard(&img);
+            }
         }
         self.close_overlay();
     }
@@ -208,24 +207,26 @@ impl App {
     }
 
     fn pin(&mut self) {
-        let Some(out) = self.output_image() else {
+        let Some(window) = self.window.as_ref().cloned() else {
             return;
         };
-        let Some(window) = self.window.as_ref() else {
-            return;
+        let out = if self.sel.is_none() && self.strokes.is_empty() {
+            // 没有裁剪/标注时直接转移所有权，不再复制整屏。
+            let Some(img) = self.img.take() else {
+                return;
+            };
+            img
+        } else {
+            let Some(img) = self.output_image() else {
+                return;
+            };
+            img
         };
         let pos = self
             .sel
             .map(normalized_rect)
             .map(|r| PhysicalPosition::new(self.origin.0 + r.0, self.origin.1 + r.1))
             .unwrap_or(PhysicalPosition::new(self.origin.0, self.origin.1));
-        self.shot = out
-            .pixels()
-            .map(|p| {
-                let [r, g, b, _] = p.0;
-                (r as u32) << 16 | (g as u32) << 8 | b as u32
-            })
-            .collect();
         // 给右上角关闭按钮留出最小可点击区域，极小选区也不会丢失控制入口。
         let size = PhysicalSize::new(out.width().max(56), out.height().max(44));
         self.img = Some(out);
@@ -286,7 +287,6 @@ impl App {
         self.window = None;
         self.surface = None;
         self.img = None;
-        self.shot = Vec::new();
         self.start = None;
         self.sel = None;
         self.windows = Vec::new();
@@ -637,9 +637,16 @@ impl ApplicationHandler for App {
                         buffer.fill(0); // 尺寸不齐时先铺黑，右/下留边不显示脏数据
                     }
                     let copy_w = iw.min(sw);
+                    let raw = img.as_raw();
                     for y in 0..ih.min(sh) {
-                        let src = &self.shot[y * iw..y * iw + copy_w];
-                        buffer[y * sw..y * sw + copy_w].copy_from_slice(src);
+                        let src = &raw[y * iw * 4..(y * iw + copy_w) * 4];
+                        let dst = &mut buffer[y * sw..y * sw + copy_w];
+                        for x in 0..copy_w {
+                            let i = x * 4;
+                            dst[x] = (src[i] as u32) << 16
+                                | (src[i + 1] as u32) << 8
+                                | src[i + 2] as u32;
+                        }
                     }
                 }
                 if let Some((a, b)) = self.sel {
@@ -1171,10 +1178,11 @@ fn crop_image(img: &RgbaImage, a: (i32, i32), b: (i32, i32)) -> Option<RgbaImage
 /// - CF_DIB 位图：微信/Word/画图 等能贴图的程序直接粘。
 /// - CF_HDROP 文件：把图另存成临时 png，终端/资源管理器粘到的是这个文件路径。
 fn image_to_clipboard(img: &RgbaImage) {
-    let dib = build_dib(img);
     // 存一份临时 png，好让只认文件的地方（命令行）也能粘到路径
     let png_path = std::env::temp_dir().join("rshot.png");
     let hdrop = img.save(&png_path).ok().map(|_| build_hdrop(&png_path));
+    // PNG 编码完成后再构造 DIB，避免两份大块临时数据同时参与编码峰值。
+    let dib = build_dib(img);
 
     unsafe {
         if OpenClipboard(None).is_err() {
@@ -1182,11 +1190,15 @@ fn image_to_clipboard(img: &RgbaImage) {
         }
         let _ = EmptyClipboard();
         if let Some(h) = global_from_bytes(&dib) {
-            let _ = SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(h.0)));
+            if SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(h.0))).is_err() {
+                let _ = GlobalFree(Some(h));
+            }
         }
         if let Some(bytes) = hdrop {
             if let Some(h) = global_from_bytes(&bytes) {
-                let _ = SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(h.0)));
+                if SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(h.0))).is_err() {
+                    let _ = GlobalFree(Some(h));
+                }
             }
         }
         let _ = CloseClipboard();
@@ -1258,6 +1270,7 @@ unsafe fn global_from_bytes(data: &[u8]) -> Option<HGLOBAL> {
         let h = GlobalAlloc(GHND, data.len()).ok()?;
         let p = GlobalLock(h);
         if p.is_null() {
+            let _ = GlobalFree(Some(h));
             return None;
         }
         std::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, data.len());
