@@ -395,6 +395,9 @@ impl App {
             color: self.color,
         });
         self.text_editing = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     /// 提交文字输入：空内容则丢弃草稿。用于回车、点工具栏、切工具等时机。
@@ -1632,9 +1635,12 @@ unsafe fn create_text_font() -> windows::Win32::Graphics::Gdi::HFONT {
     }
 }
 
-/// 用 GDI 量出文字尺寸（DT_CALCRECT，与渲染一致）。空串也至少返回 (1, 行高)。
+/// 用 GDI 量出文字尺寸（DT_CALCRECT，与渲染一致）。空串直接返回最小尺寸，避免把空切片交给 DrawTextW 读越界。
 fn gdi_text_size(text: &str) -> (i32, i32) {
-    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    if text.is_empty() {
+        return (1, TEXT_FONT_HEIGHT);
+    }
+    let mut wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         let hdc = CreateCompatibleDC(None);
         if hdc.is_invalid() {
@@ -1672,7 +1678,7 @@ fn gdi_render_text_rgba(text: &str, color: [u8; 4]) -> Option<(i32, i32, Vec<u8>
     if text.is_empty() {
         return None;
     }
-    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         let hdc = CreateCompatibleDC(None);
         if hdc.is_invalid() {
@@ -2043,10 +2049,10 @@ unsafe fn global_from_bytes(data: &[u8]) -> Option<HGLOBAL> {
 mod tests {
     use super::{
         Annotation, App, Mode, Shape, Tool, ToolbarAction, ToolbarItem, build_dib, color_u32,
-        crop_image, draw_annotation_image, draw_line_image, draw_rect_image, normalized_rect,
-        palette_hit, palette_popup_rect, palette_swatch_rect, toolbar_hit, toolbar_item,
-        toolbar_item_rect, toolbar_item_slot, toolbar_origin, TOOLBAR_SLOT_COLOR,
-        TOOLBAR_SLOT_COUNT, PALETTE,
+        crop_image, draw_annotation_image, draw_line_image, draw_rect_image, gdi_text_size,
+        normalized_rect, palette_hit, palette_popup_rect, palette_swatch_rect, toolbar_hit,
+        toolbar_item, toolbar_item_rect, toolbar_item_slot, toolbar_origin, TOOLBAR_SLOT_COLOR,
+        TOOLBAR_SLOT_COUNT, TEXT_FONT_HEIGHT, PALETTE,
     };
     use xcap::image::RgbaImage;
 
@@ -2262,6 +2268,14 @@ mod tests {
         };
         draw_annotation_image(&mut img, &ann, (0, 0));
         let _ = img;
+    }
+
+    #[test]
+    fn empty_text_does_not_reach_drawtext() {
+        // 空文字走 gdi_text_size 必须直接返回最小尺寸，绝不能把空切片交给 DrawTextW（会读越界闪退）
+        let (w, h) = gdi_text_size("");
+        assert_eq!(w, 1);
+        assert_eq!(h, TEXT_FONT_HEIGHT);
     }
 }
 
