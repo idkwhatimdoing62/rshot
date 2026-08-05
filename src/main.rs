@@ -39,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
@@ -143,6 +143,9 @@ struct App {
     palette_hover: Option<usize>,
     palette_pressed: Option<usize>,
     text_editing: bool, // 文字工具正在输入中（annotations 末尾那条 Text 是草稿）
+    ime_preedit: String, // 输入法组合中的拼音串（非空 = 组合中）
+    cursor_visible: bool, // 文字输入光标闪烁状态
+    last_blink: Option<Instant>,
     modifiers: ModifiersState,
     pin_drag: Option<((i32, i32), (i32, i32))>,
 }
@@ -177,6 +180,7 @@ impl App {
         self.toolbar_hover = None;
         self.toolbar_pressed = None;
         self.text_editing = false;
+        self.ime_preedit.clear();
         self.close_palette();
         self.pin_drag = None;
 
@@ -218,6 +222,8 @@ impl App {
         );
         let context = Context::new(window.clone()).unwrap();
         let surface = Surface::new(&context, window.clone()).unwrap();
+        #[allow(deprecated)]
+        window.set_ime_allowed(true); // 让遮罩窗口能接收输入法组合（拼音候选窗）
         window.request_redraw(); // 主动要首帧，否则黑底白窗
         self.window = Some(window);
         self.surface = Some(surface);
@@ -288,6 +294,7 @@ impl App {
         self.toolbar_hover = None;
         self.toolbar_pressed = None;
         self.text_editing = false;
+        self.ime_preedit.clear();
         self.close_palette();
         self.mode = Mode::Pinned;
         self.pin_drag = None;
@@ -335,6 +342,18 @@ impl App {
         self.palette_open = false;
         self.palette_hover = None;
         self.palette_pressed = None;
+    }
+
+    /// 选中色板颜色：更新当前颜色；若正在输入文字，同步改掉草稿颜色（放框后再选色也能立即生效）。
+    fn set_color(&mut self, index: usize) {
+        self.color = PALETTE[index];
+        if self.text_editing {
+            if let Some(last) = self.annotations.last_mut() {
+                if matches!(last.shape, Shape::Text(..)) {
+                    last.color = self.color;
+                }
+            }
+        }
     }
 
     /// 在编辑区按下左键：按当前工具起一条标注（拖动中实时更新，松手才定型）。
@@ -395,6 +414,10 @@ impl App {
             color: self.color,
         });
         self.text_editing = true;
+        self.ime_preedit.clear();
+        self.cursor_visible = true;
+        self.last_blink = None;
+        self.update_ime_area();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -406,6 +429,7 @@ impl App {
             return;
         }
         self.text_editing = false;
+        self.ime_preedit.clear();
         if let Some(last) = self.annotations.last() {
             if let Shape::Text(_, text) = &last.shape {
                 if text.is_empty() {
@@ -424,6 +448,7 @@ impl App {
             return;
         }
         self.text_editing = false;
+        self.ime_preedit.clear();
         if let Some(last) = self.annotations.last() {
             if matches!(last.shape, Shape::Text(..)) {
                 self.annotations.pop();
@@ -431,6 +456,31 @@ impl App {
         }
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    /// 把输入法候选窗定位到光标处（文字标注末尾）。
+    #[allow(deprecated)]
+    fn update_ime_area(&self) {
+        if let Some(w) = &self.window {
+            if let Some((x, y)) = self.caret_pos() {
+                w.set_ime_cursor_area(
+                    PhysicalPosition::new(x, y).into(),
+                    PhysicalSize::new(2, TEXT_FONT_HEIGHT + 4).into(),
+                );
+            }
+        }
+    }
+
+    /// 当前光标位置（文字末尾，含组合中拼音）的窗口内坐标。
+    fn caret_pos(&self) -> Option<(i32, i32)> {
+        let ann = self.annotations.last()?;
+        if let Shape::Text(pos, text) = &ann.shape {
+            let full = format!("{text}{}", self.ime_preedit);
+            let (tw, _) = gdi_text_size(&full);
+            Some((pos.0 + tw, pos.1))
+        } else {
+            None
         }
     }
 
@@ -446,6 +496,7 @@ impl App {
         self.toolbar_hover = None;
         self.toolbar_pressed = None;
         self.text_editing = false;
+        self.ime_preedit.clear();
         self.close_palette();
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -468,6 +519,7 @@ impl App {
         self.toolbar_hover = None;
         self.toolbar_pressed = None;
         self.text_editing = false;
+        self.ime_preedit.clear();
         self.close_palette();
         self.pin_drag = None;
     }
@@ -515,6 +567,27 @@ impl ApplicationHandler for App {
                 }
             }
         }
+        // 文字输入光标闪烁：每 ~530ms 翻转一次可见性
+        if self.text_editing && self.mode == Mode::Editing {
+            let now = Instant::now();
+            match self.last_blink {
+                Some(last) if now.duration_since(last) >= Duration::from_millis(530) => {
+                    self.cursor_visible = !self.cursor_visible;
+                    self.last_blink = Some(now);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+                None => {
+                    self.last_blink = Some(now);
+                    self.cursor_visible = true;
+                }
+                _ => {}
+            }
+        } else {
+            self.last_blink = None;
+            self.cursor_visible = true;
+        }
         // ponytail: 120ms 轮询一次热键。想零延迟得用 EventLoopProxy 唤醒，暂不需要
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             Instant::now() + Duration::from_millis(120),
@@ -536,12 +609,17 @@ impl ApplicationHandler for App {
                 if event.state == ElementState::Pressed {
                     // 文字输入中：字符进缓冲区，退格删字，回车提交，Esc 取消
                     if self.text_editing && self.mode == Mode::Editing {
+                        // 输入法组合中：按键交给 IME（拼音会走 Preedit/Commit），别自己处理，避免重复进缓冲
+                        if !self.ime_preedit.is_empty() {
+                            return;
+                        }
                         if event.physical_key == PhysicalKey::Code(KeyCode::Backspace) {
                             if let Some(last) = self.annotations.last_mut() {
                                 if let Shape::Text(_, text) = &mut last.shape {
                                     text.pop();
                                 }
                             }
+                            self.update_ime_area();
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
@@ -562,6 +640,7 @@ impl ApplicationHandler for App {
                                         buf.push_str(text.as_str());
                                     }
                                 }
+                                self.update_ime_area();
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
                                 }
@@ -642,6 +721,62 @@ impl ApplicationHandler for App {
                             return;
                         }
                         self.close_overlay();
+                    }
+                }
+            }
+            WindowEvent::Ime(ime) => {
+                // 输入法组合：只处理正在编辑文字时
+                if self.text_editing && self.mode == Mode::Editing {
+                    match ime {
+                        Ime::Preedit(text, _cursor) => {
+                            // 首次进入组合：若键盘事件已把同样的拼音塞进草稿尾部，先去掉避免重复
+                            if self.ime_preedit.is_empty() && !text.is_empty() {
+                                if let Some(last) = self.annotations.last_mut() {
+                                    if let Shape::Text(_, buf) = &mut last.shape {
+                                        let n = text.chars().count();
+                                        let tail: String = buf
+                                            .chars()
+                                            .rev()
+                                            .take(n)
+                                            .collect::<Vec<_>>()
+                                            .into_iter()
+                                            .rev()
+                                            .collect();
+                                        if tail == text {
+                                            for _ in 0..n {
+                                                buf.pop();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            self.ime_preedit = text;
+                            self.update_ime_area();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                        Ime::Commit(text) => {
+                            self.ime_preedit.clear();
+                            if let Some(last) = self.annotations.last_mut() {
+                                if let Shape::Text(_, buf) = &mut last.shape {
+                                    buf.push_str(&text);
+                                }
+                            }
+                            self.update_ime_area();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                        Ime::Enabled => {
+                            self.update_ime_area();
+                        }
+                        Ime::Disabled | Ime::DeleteSurrounding { .. } => {
+                            self.ime_preedit.clear();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
                     }
                 }
             }
@@ -782,7 +917,7 @@ impl ApplicationHandler for App {
                             ElementState::Released => {
                                 if let Some(pressed) = self.palette_pressed.take() {
                                     if palette_swatch == Some(pressed) {
-                                        self.color = PALETTE[pressed];
+                                        self.set_color(pressed);
                                         self.close_palette();
                                         if let Some(w) = &self.window {
                                             w.request_redraw();
@@ -970,7 +1105,14 @@ impl ApplicationHandler for App {
                     // 文字输入中的草稿：在文字上方画输入框 + 光标
                     if self.text_editing {
                         if let Some(ann) = self.annotations.last() {
-                            draw_text_edit_box(&mut buffer[..], w.get(), h.get(), ann);
+                            draw_text_edit_box(
+                                &mut buffer[..],
+                                w.get(),
+                                h.get(),
+                                ann,
+                                &self.ime_preedit,
+                                self.cursor_visible,
+                            );
                         }
                     }
                     draw_toolbar(
@@ -1824,24 +1966,45 @@ fn draw_text_image(img: &mut RgbaImage, text: &str, pos: (i32, i32), color: [u8;
     }
 }
 
-/// 画文字输入框：边框 + 末尾光标（用于 text_editing 时的草稿）。
-fn draw_text_edit_box(buf: &mut [u32], w: u32, h: u32, ann: &Annotation) {
+/// 画文字输入提示：组合拼音（浅色+下划线）+ 闪烁光标。不画外边框。
+fn draw_text_edit_box(
+    buf: &mut [u32],
+    w: u32,
+    h: u32,
+    ann: &Annotation,
+    preedit: &str,
+    cursor_visible: bool,
+) {
+    const CARET_COLOR: u32 = 0x004C9AFF; // 亮蓝：在任何底色上都醒目
     if let Shape::Text(pos, text) = &ann.shape {
-        let (tw, th) = gdi_text_size(text);
+        let full = format!("{text}{preedit}");
+        let (tw, th) = gdi_text_size(&full);
         let (tw, th) = (tw.max(4), th.max(TEXT_FONT_HEIGHT));
-        draw_rect(
-            buf,
-            w,
-            h,
-            pos.0,
-            pos.1,
-            pos.0 + tw,
-            pos.1 + th,
-            0x00FFFFFF,
-            1,
-        );
-        let cx = pos.0 + tw;
-        draw_line_buffer(buf, w, h, (cx, pos.1 + 2), (cx, pos.1 + th - 2), 0x00FFFFFF, 0);
+        // 组合中的拼音：画在已提交文字后面，用浅色 + 下划线区分
+        if !preedit.is_empty() {
+            let (tw0, _) = gdi_text_size(text);
+            let lighter = [
+                ann.color[0] + (255 - ann.color[0]) / 2,
+                ann.color[1] + (255 - ann.color[1]) / 2,
+                ann.color[2] + (255 - ann.color[2]) / 2,
+                255,
+            ];
+            draw_text_buffer(buf, w, h, preedit, (pos.0 + tw0, pos.1), lighter);
+            draw_line_buffer(
+                buf,
+                w,
+                h,
+                (pos.0 + tw0, pos.1 + th - 2),
+                (pos.0 + tw, pos.1 + th - 2),
+                color_u32(lighter),
+                0,
+            );
+        }
+        // 闪烁光标：3px 宽实心竖条，紧跟文字末尾
+        if cursor_visible {
+            let cx = pos.0 + tw;
+            draw_line_buffer(buf, w, h, (cx, pos.1 + 2), (cx, pos.1 + th - 2), CARET_COLOR, 1);
+        }
     }
 }
 
@@ -2276,6 +2439,32 @@ mod tests {
         let (w, h) = gdi_text_size("");
         assert_eq!(w, 1);
         assert_eq!(h, TEXT_FONT_HEIGHT);
+    }
+
+    #[test]
+    fn commit_and_cancel_clear_ime_preedit() {
+        let mut app = App::default();
+        app.mode = Mode::Editing;
+        app.start_text((5, 5));
+        app.ime_preedit = String::from("ni");
+        app.commit_text();
+        assert!(app.ime_preedit.is_empty());
+        app.start_text((6, 6));
+        app.ime_preedit = String::from("hao");
+        app.cancel_text();
+        assert!(app.ime_preedit.is_empty());
+    }
+
+    #[test]
+    fn set_color_updates_editing_text_draft() {
+        let mut app = App::default();
+        app.mode = Mode::Editing;
+        app.color = PALETTE[0];
+        app.start_text((5, 5)); // 红色草稿
+        assert_eq!(app.annotations[0].color, PALETTE[0]);
+        app.set_color(4); // 输入中换蓝
+        assert_eq!(app.color, PALETTE[4]);
+        assert_eq!(app.annotations[0].color, PALETTE[4]);
     }
 }
 
