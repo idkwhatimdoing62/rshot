@@ -18,9 +18,9 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DeleteDC,
-    DeleteObject, DIB_RGB_COLORS, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_TOP, DrawTextW,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
+    DIB_RGB_COLORS, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_TOP, DeleteDC, DeleteObject, DrawTextW,
     FF_DONTCARE, FW_NORMAL, GetDIBits, HGDIOBJ, OPAQUE, OUT_DEFAULT_PRECIS, SelectObject,
     SetBkColor, SetBkMode, SetTextColor,
 };
@@ -142,8 +142,8 @@ struct App {
     palette_open: bool,
     palette_hover: Option<usize>,
     palette_pressed: Option<usize>,
-    text_editing: bool, // 文字工具正在输入中（annotations 末尾那条 Text 是草稿）
-    ime_preedit: String, // 输入法组合中的拼音串（非空 = 组合中）
+    text_editing: bool,   // 文字工具正在输入中（annotations 末尾那条 Text 是草稿）
+    ime_preedit: String,  // 输入法组合中的拼音串（非空 = 组合中）
     cursor_visible: bool, // 文字输入光标闪烁状态
     last_blink: Option<Instant>,
     modifiers: ModifiersState,
@@ -396,11 +396,7 @@ impl App {
         if drop {
             self.annotations.pop();
         } else if dot {
-            if let Some(Shape::Pen(points)) = self
-                .annotations
-                .last_mut()
-                .map(|a| &mut a.shape)
-            {
+            if let Some(Shape::Pen(points)) = self.annotations.last_mut().map(|a| &mut a.shape) {
                 points.push(points[0]);
             }
         }
@@ -794,17 +790,10 @@ impl ApplicationHandler for App {
                     let hover_changed = hover_index != self.toolbar_hover;
                     self.toolbar_hover = hover_index;
                     let palette_hover = if self.palette_open {
-                        self.window
-                            .as_ref()
-                            .and_then(|w| {
-                                let size = w.surface_size();
-                                palette_hit(
-                                    self.cur,
-                                    size.width as i32,
-                                    size.height as i32,
-                                    self.sel,
-                                )
-                            })
+                        self.window.as_ref().and_then(|w| {
+                            let size = w.surface_size();
+                            palette_hit(self.cur, size.width as i32, size.height as i32, self.sel)
+                        })
                     } else {
                         None
                     };
@@ -874,17 +863,10 @@ impl ApplicationHandler for App {
                                 )
                             });
                     let palette_swatch = if self.palette_open {
-                        self.window
-                            .as_ref()
-                            .and_then(|w| {
-                                let size = w.surface_size();
-                                palette_hit(
-                                    self.cur,
-                                    size.width as i32,
-                                    size.height as i32,
-                                    self.sel,
-                                )
-                            })
+                        self.window.as_ref().and_then(|w| {
+                            let size = w.surface_size();
+                            palette_hit(self.cur, size.width as i32, size.height as i32, self.sel)
+                        })
                     } else {
                         None
                     };
@@ -1226,7 +1208,6 @@ fn draw_rect(
 
 const TOOLBAR_HEIGHT: i32 = 38;
 const TOOLBAR_GAP: i32 = 4;
-const TOOLBAR_PAD: i32 = 8;
 const SWATCH: i32 = 26; // 色板色块边长
 const SWATCH_GAP: i32 = 4;
 const PALETTE_PAD: i32 = 6; // 色板弹层内边距
@@ -1284,10 +1265,8 @@ fn toolbar_item_slot(item: ToolbarItem) -> usize {
 }
 
 fn toolbar_size() -> (i32, i32) {
-    let w = TOOLBAR_ITEM_WIDTHS.iter().sum::<i32>()
-        + TOOLBAR_GAP * (TOOLBAR_SLOT_COUNT as i32 - 1)
-        + TOOLBAR_PAD * 2;
-    (w, TOOLBAR_HEIGHT + TOOLBAR_PAD * 2)
+    let w = TOOLBAR_ITEM_WIDTHS.iter().sum::<i32>() + TOOLBAR_GAP * (TOOLBAR_SLOT_COUNT as i32 - 1);
+    (w, TOOLBAR_HEIGHT)
 }
 
 fn toolbar_origin(w: i32, h: i32, sel: Option<((i32, i32), (i32, i32))>) -> (i32, i32) {
@@ -1333,9 +1312,8 @@ fn toolbar_hit(
 
 /// 色板弹层的整体矩形（对齐在色板按钮下，水平居中）。
 fn palette_size() -> (i32, i32) {
-    let w = PALETTE.len() as i32 * SWATCH
-        + (PALETTE.len() as i32 - 1) * SWATCH_GAP
-        + PALETTE_PAD * 2;
+    let w =
+        PALETTE.len() as i32 * SWATCH + (PALETTE.len() as i32 - 1) * SWATCH_GAP + PALETTE_PAD * 2;
     (w, SWATCH + PALETTE_PAD * 2)
 }
 
@@ -1354,7 +1332,12 @@ fn palette_popup_rect(w: i32, h: i32, color_rect: (i32, i32, i32, i32)) -> (i32,
 
 fn palette_swatch_rect(popup: (i32, i32, i32, i32), i: usize) -> (i32, i32, i32, i32) {
     let x = popup.0 + PALETTE_PAD + i as i32 * (SWATCH + SWATCH_GAP);
-    (x, popup.1 + PALETTE_PAD, x + SWATCH, popup.1 + PALETTE_PAD + SWATCH)
+    (
+        x,
+        popup.1 + PALETTE_PAD,
+        x + SWATCH,
+        popup.1 + PALETTE_PAD + SWATCH,
+    )
 }
 
 fn palette_hit(
@@ -1446,10 +1429,30 @@ fn draw_toolbar(
         // 高亮：选中的工具 / 打开中的色板按钮
         match item {
             ToolbarItem::Tool(t) if t == tool => {
-                draw_rect(buf, w, h, rect.0, rect.1, rect.2 - 1, rect.3 - 1, 0x00FFFFFF, 2);
+                draw_rect(
+                    buf,
+                    w,
+                    h,
+                    rect.0,
+                    rect.1,
+                    rect.2 - 1,
+                    rect.3 - 1,
+                    0x00FFFFFF,
+                    2,
+                );
             }
             ToolbarItem::Color if palette_open => {
-                draw_rect(buf, w, h, rect.0, rect.1, rect.2 - 1, rect.3 - 1, 0x00FFFFFF, 2);
+                draw_rect(
+                    buf,
+                    w,
+                    h,
+                    rect.0,
+                    rect.1,
+                    rect.2 - 1,
+                    rect.3 - 1,
+                    0x00FFFFFF,
+                    2,
+                );
             }
             _ => {}
         }
@@ -1538,11 +1541,41 @@ fn draw_palette_popup(
         let rect = palette_swatch_rect(popup, i);
         draw_fill_rect(buf, w, h, rect, color_u32(PALETTE[i]));
         if PALETTE[i] == color {
-            draw_rect(buf, w, h, rect.0 - 1, rect.1 - 1, rect.2, rect.3, 0x00FFFFFF, 2);
+            draw_rect(
+                buf,
+                w,
+                h,
+                rect.0 - 1,
+                rect.1 - 1,
+                rect.2,
+                rect.3,
+                0x00FFFFFF,
+                2,
+            );
         } else if hover == Some(i) {
-            draw_rect(buf, w, h, rect.0 - 1, rect.1 - 1, rect.2, rect.3, 0x006D91B5, 2);
+            draw_rect(
+                buf,
+                w,
+                h,
+                rect.0 - 1,
+                rect.1 - 1,
+                rect.2,
+                rect.3,
+                0x006D91B5,
+                2,
+            );
         }
-        draw_rect(buf, w, h, rect.0, rect.1, rect.2 - 1, rect.3 - 1, 0x00D9E2EC, 1);
+        draw_rect(
+            buf,
+            w,
+            h,
+            rect.0,
+            rect.1,
+            rect.2 - 1,
+            rect.3 - 1,
+            0x00D9E2EC,
+            1,
+        );
     }
 }
 
@@ -2003,7 +2036,15 @@ fn draw_text_edit_box(
         // 闪烁光标：3px 宽实心竖条，紧跟文字末尾
         if cursor_visible {
             let cx = pos.0 + tw;
-            draw_line_buffer(buf, w, h, (cx, pos.1 + 2), (cx, pos.1 + th - 2), CARET_COLOR, 1);
+            draw_line_buffer(
+                buf,
+                w,
+                h,
+                (cx, pos.1 + 2),
+                (cx, pos.1 + th - 2),
+                CARET_COLOR,
+                1,
+            );
         }
     }
 }
@@ -2052,9 +2093,7 @@ fn draw_annotation_image(img: &mut RgbaImage, ann: &Annotation, offset: (i32, i3
             ann.color,
             3,
         ),
-        Shape::Text(pos, text) => {
-            draw_text_image(img, text, (pos.0 - o.0, pos.1 - o.1), ann.color)
-        }
+        Shape::Text(pos, text) => draw_text_image(img, text, (pos.0 - o.0, pos.1 - o.1), ann.color),
     }
 }
 
@@ -2211,11 +2250,11 @@ unsafe fn global_from_bytes(data: &[u8]) -> Option<HGLOBAL> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Annotation, App, Mode, Shape, Tool, ToolbarAction, ToolbarItem, build_dib, color_u32,
-        crop_image, draw_annotation_image, draw_line_image, draw_rect_image, gdi_text_size,
-        normalized_rect, palette_hit, palette_popup_rect, palette_swatch_rect, toolbar_hit,
-        toolbar_item, toolbar_item_rect, toolbar_item_slot, toolbar_origin, TOOLBAR_SLOT_COLOR,
-        TOOLBAR_SLOT_COUNT, TEXT_FONT_HEIGHT, PALETTE,
+        Annotation, App, Mode, PALETTE, Shape, TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR,
+        TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, build_dib, color_u32, crop_image,
+        draw_annotation_image, draw_line_image, draw_rect_image, gdi_text_size, normalized_rect,
+        palette_hit, palette_popup_rect, palette_swatch_rect, toolbar_hit, toolbar_item,
+        toolbar_item_rect, toolbar_item_slot, toolbar_origin, toolbar_size,
     };
     use xcap::image::RgbaImage;
 
@@ -2254,7 +2293,10 @@ mod tests {
         let origin = toolbar_origin(1920, 1080, sel);
         for slot in 0..TOOLBAR_SLOT_COUNT {
             let rect = toolbar_item_rect(origin, slot);
-            let mid = (rect.0 + (rect.2 - rect.0) / 2, rect.1 + (rect.3 - rect.1) / 2);
+            let mid = (
+                rect.0 + (rect.2 - rect.0) / 2,
+                rect.1 + (rect.3 - rect.1) / 2,
+            );
             assert_eq!(
                 toolbar_hit(mid, 1920, 1080, sel),
                 Some(toolbar_item(slot)),
@@ -2262,6 +2304,15 @@ mod tests {
             );
             assert_eq!(toolbar_item_slot(toolbar_item(slot)), slot);
         }
+    }
+
+    #[test]
+    fn toolbar_background_ends_at_last_item() {
+        let origin = (40, 60);
+        let (width, height) = toolbar_size();
+        let last = toolbar_item_rect(origin, TOOLBAR_SLOT_COUNT - 1);
+        assert_eq!(origin.0 + width, last.2);
+        assert_eq!(origin.1 + height, last.3);
     }
 
     #[test]
