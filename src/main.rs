@@ -5,12 +5,16 @@
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use serde::{Deserialize, Serialize};
 use softbuffer::{Context, Surface};
+use std::borrow::Cow;
 use std::error::Error;
 use std::ffi::c_void;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
+use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
+use windows::Media::Ocr::OcrEngine;
+use windows::Storage::Streams::DataWriter;
 use windows::Win32::Foundation::{
     COLORREF, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT,
 };
@@ -28,13 +32,15 @@ use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GHND, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows::Win32::System::Ole::{CF_DIB, CF_HDROP};
+use windows::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
+use windows::Win32::System::WinRT::{RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Shell::DROPFILES;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetWindowRect, IsIconic, IsWindowVisible, MB_ICONERROR, MessageBoxW,
+    EnumWindows, GetCursorPos, GetWindowRect, IsIconic, IsWindowVisible, MB_ICONERROR,
+    MB_ICONINFORMATION, MessageBoxW,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use winit::application::ApplicationHandler;
@@ -45,6 +51,22 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 use xcap::Monitor;
 use xcap::image::{RgbaImage, imageops};
+
+/// 主 UI 线程使用单线程 WinRT apartment；OCR 生命周期覆盖整个事件循环。
+struct WinRtApartment;
+
+impl WinRtApartment {
+    fn initialize() -> windows::core::Result<Self> {
+        unsafe { RoInitialize(RO_INIT_SINGLETHREADED)? };
+        Ok(Self)
+    }
+}
+
+impl Drop for WinRtApartment {
+    fn drop(&mut self) {
+        unsafe { RoUninitialize() };
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -264,6 +286,43 @@ impl App {
         Some(out)
     }
 
+    /// 识别当前原始选区中的文字并写入文字剪贴板。标注层不会参与 OCR。
+    fn copy_ocr_text(&mut self) {
+        self.commit_text();
+        let Some(img) = self.img.as_ref() else {
+            return;
+        };
+        if let Some(w) = &self.window {
+            w.set_visible(false);
+        }
+
+        let result = recognize_image_text(img, self.sel);
+        match result {
+            Ok(text) if text.is_empty() => {
+                show_message("未识别到文字。\n请缩小选区，并确保文字足够清晰。", false);
+                if let Some(w) = &self.window {
+                    w.set_visible(true);
+                    w.request_redraw();
+                }
+            }
+            Ok(text) if text_to_clipboard(&text) => self.close_overlay(),
+            Ok(_) => {
+                show_message("文字已识别，但写入剪贴板失败，请重试。", true);
+                if let Some(w) = &self.window {
+                    w.set_visible(true);
+                    w.request_redraw();
+                }
+            }
+            Err(error) => {
+                show_message(&format!("文字识别失败：\n{error}"), true);
+                if let Some(w) = &self.window {
+                    w.set_visible(true);
+                    w.request_redraw();
+                }
+            }
+        }
+    }
+
     fn pin(&mut self) {
         let Some(window) = self.window.as_ref().cloned() else {
             return;
@@ -325,6 +384,7 @@ impl App {
             }
             ToolbarItem::Action(action) => match action {
                 ToolbarAction::Copy => self.confirm(),
+                ToolbarAction::Ocr => self.copy_ocr_text(),
                 ToolbarAction::Reselect => self.reselect(),
                 ToolbarAction::Pin => self.pin(),
                 ToolbarAction::Undo => {
@@ -700,6 +760,12 @@ impl ApplicationHandler for App {
                         && self.mode == Mode::Editing
                     {
                         self.reselect();
+                        return;
+                    }
+                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyO)
+                        && self.mode == Mode::Editing
+                    {
+                        self.copy_ocr_text();
                         return;
                     }
                     if event.physical_key == PhysicalKey::Code(KeyCode::KeyC)
@@ -1212,9 +1278,9 @@ const SWATCH: i32 = 26; // 色板色块边长
 const SWATCH_GAP: i32 = 4;
 const PALETTE_PAD: i32 = 6; // 色板弹层内边距
 
-// 单行工具栏：PEN / LINE / RECT / TEXT / COLOR / UNDO / COPY / PIN / SELECT / X
-const TOOLBAR_ITEM_WIDTHS: [i32; 10] = [52, 56, 56, 56, 56, 62, 52, 52, 78, 34];
-const TOOLBAR_SLOT_COUNT: usize = 10;
+// 单行工具栏：PEN / LINE / RECT / TEXT / COLOR / UNDO / COPY / OCR / PIN / SELECT / X
+const TOOLBAR_ITEM_WIDTHS: [i32; 11] = [46, 50, 50, 50, 44, 50, 50, 42, 44, 74, 30];
+const TOOLBAR_SLOT_COUNT: usize = 11;
 const TOOLBAR_SLOT_COLOR: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1228,6 +1294,7 @@ enum ToolbarItem {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolbarAction {
     Copy,
+    Ocr,
     Reselect,
     Pin,
     Undo,
@@ -1243,8 +1310,9 @@ fn toolbar_item(slot: usize) -> ToolbarItem {
         4 => ToolbarItem::Color,
         5 => ToolbarItem::Action(ToolbarAction::Undo),
         6 => ToolbarItem::Action(ToolbarAction::Copy),
-        7 => ToolbarItem::Action(ToolbarAction::Pin),
-        8 => ToolbarItem::Action(ToolbarAction::Reselect),
+        7 => ToolbarItem::Action(ToolbarAction::Ocr),
+        8 => ToolbarItem::Action(ToolbarAction::Pin),
+        9 => ToolbarItem::Action(ToolbarAction::Reselect),
         _ => ToolbarItem::Action(ToolbarAction::Close),
     }
 }
@@ -1258,9 +1326,10 @@ fn toolbar_item_slot(item: ToolbarItem) -> usize {
         ToolbarItem::Color => 4,
         ToolbarItem::Action(ToolbarAction::Undo) => 5,
         ToolbarItem::Action(ToolbarAction::Copy) => 6,
-        ToolbarItem::Action(ToolbarAction::Pin) => 7,
-        ToolbarItem::Action(ToolbarAction::Reselect) => 8,
-        ToolbarItem::Action(ToolbarAction::Close) => 9,
+        ToolbarItem::Action(ToolbarAction::Ocr) => 7,
+        ToolbarItem::Action(ToolbarAction::Pin) => 8,
+        ToolbarItem::Action(ToolbarAction::Reselect) => 9,
+        ToolbarItem::Action(ToolbarAction::Close) => 10,
     }
 }
 
@@ -1414,6 +1483,7 @@ fn draw_toolbar(
             }
             ToolbarItem::Color => 0x003B78C8,
             ToolbarItem::Action(ToolbarAction::Copy) => 0x002D9B68,
+            ToolbarItem::Action(ToolbarAction::Ocr) => 0x00704AA3,
             ToolbarItem::Action(ToolbarAction::Reselect) => 0x006B5AA8,
             ToolbarItem::Action(ToolbarAction::Pin) => 0x003B78C8,
             ToolbarItem::Action(ToolbarAction::Undo) => 0x00515D6B,
@@ -1495,6 +1565,7 @@ fn draw_toolbar(
                     ToolbarItem::Tool(Tool::Rect) => "RECT",
                     ToolbarItem::Tool(Tool::Text) => "TEXT",
                     ToolbarItem::Action(ToolbarAction::Copy) => "COPY",
+                    ToolbarItem::Action(ToolbarAction::Ocr) => "OCR",
                     ToolbarItem::Action(ToolbarAction::Reselect) => "SELECT",
                     ToolbarItem::Action(ToolbarAction::Pin) => "PIN",
                     ToolbarItem::Action(ToolbarAction::Undo) => "UNDO",
@@ -2142,6 +2213,137 @@ fn crop_image(img: &RgbaImage, a: (i32, i32), b: (i32, i32)) -> Option<RgbaImage
     Some(imageops::crop_imm(img, left as u32, top as u32, bw, bh).to_image())
 }
 
+/// 计算 OCR 使用的原图区域。返回 left / top / width / height，全部限制在图片内。
+fn ocr_region(
+    img: &RgbaImage,
+    sel: Option<((i32, i32), (i32, i32))>,
+) -> Option<(u32, u32, u32, u32)> {
+    let (iw, ih) = (img.width() as i32, img.height() as i32);
+    let (left, top, right, bottom) = sel.map(normalized_rect).unwrap_or((0, 0, iw, ih));
+    let left = left.clamp(0, iw);
+    let right = right.clamp(0, iw);
+    let top = top.clamp(0, ih);
+    let bottom = bottom.clamp(0, ih);
+    (right > left && bottom > top).then_some((
+        left as u32,
+        top as u32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    ))
+}
+
+/// 从原始截图提取 OCR 输入，并在超过系统上限时等比缩小。这样不会识别用户画的标注。
+fn prepare_ocr_rgba<'a>(
+    img: &'a RgbaImage,
+    sel: Option<((i32, i32), (i32, i32))>,
+    max_dimension: u32,
+) -> Option<(Cow<'a, [u8]>, u32, u32)> {
+    if max_dimension == 0 {
+        return None;
+    }
+    let (left, top, width, height) = ocr_region(img, sel)?;
+    let largest = width.max(height);
+    if largest > max_dimension {
+        let scaled_width = ((width as u64 * max_dimension as u64) / largest as u64).max(1) as u32;
+        let scaled_height = ((height as u64 * max_dimension as u64) / largest as u64).max(1) as u32;
+        let view = imageops::crop_imm(img, left, top, width, height);
+        let resized = imageops::resize(
+            &*view,
+            scaled_width,
+            scaled_height,
+            imageops::FilterType::Triangle,
+        );
+        return Some((Cow::Owned(resized.into_raw()), scaled_width, scaled_height));
+    }
+
+    if left == 0 && top == 0 && width == img.width() && height == img.height() {
+        return Some((Cow::Borrowed(img.as_raw()), width, height));
+    }
+
+    // 未缩放时按行直接复制选区，避免先创建一个 RgbaImage 再复制进 WinRT 缓冲区。
+    let source_stride = img.width() as usize * 4;
+    let row_bytes = width as usize * 4;
+    let raw = img.as_raw();
+    let mut rgba = Vec::with_capacity(row_bytes * height as usize);
+    for y in top..top + height {
+        let start = y as usize * source_stride + left as usize * 4;
+        rgba.extend_from_slice(&raw[start..start + row_bytes]);
+    }
+    Some((Cow::Owned(rgba), width, height))
+}
+
+/// 调用系统自带的 Windows.Media.Ocr，按用户系统语言识别，不需要联网或随程序携带模型。
+fn recognize_image_text(
+    img: &RgbaImage,
+    sel: Option<((i32, i32), (i32, i32))>,
+) -> Result<String, String> {
+    let engine = OcrEngine::TryCreateFromUserProfileLanguages()
+        .map_err(|e| format!("无法创建系统 OCR 引擎（请确认已安装对应语言包）：{e}"))?;
+    let max_dimension =
+        OcrEngine::MaxImageDimension().map_err(|e| format!("无法读取 OCR 图片尺寸上限：{e}"))?;
+    let (rgba, width, height) =
+        prepare_ocr_rgba(img, sel, max_dimension).ok_or_else(|| String::from("选区尺寸无效"))?;
+
+    let writer = DataWriter::new().map_err(|e| format!("无法创建图片缓冲区：{e}"))?;
+    writer
+        .WriteBytes(&rgba)
+        .map_err(|e| format!("无法写入图片缓冲区：{e}"))?;
+    let buffer = writer
+        .DetachBuffer()
+        .map_err(|e| format!("无法读取图片缓冲区：{e}"))?;
+    let bitmap = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
+        &buffer,
+        BitmapPixelFormat::Rgba8,
+        width as i32,
+        height as i32,
+        BitmapAlphaMode::Straight,
+    )
+    .map_err(|e| format!("无法创建 OCR 图片：{e}"))?;
+    drop(buffer);
+    drop(writer);
+    drop(rgba);
+
+    let result = engine
+        .RecognizeAsync(&bitmap)
+        .and_then(|operation| operation.join())
+        .map_err(|e| format!("系统 OCR 识别失败：{e}"))?;
+    let text = result
+        .Text()
+        .map_err(|e| format!("无法读取 OCR 结果：{e}"))?
+        .to_string();
+    Ok(text.trim().to_owned())
+}
+
+fn unicode_text_bytes(text: &str) -> Vec<u8> {
+    text.encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+fn text_to_clipboard(text: &str) -> bool {
+    let bytes = unicode_text_bytes(text);
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return false;
+        }
+        if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            return false;
+        }
+        let success = global_from_bytes(&bytes).is_some_and(|h| {
+            if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(h.0))).is_ok() {
+                true
+            } else {
+                let _ = GlobalFree(Some(h));
+                false
+            }
+        });
+        let _ = CloseClipboard();
+        success
+    }
+}
+
 /// 把截图放进剪贴板，同时挂两种格式：
 /// - CF_DIB 位图：微信/Word/画图 等能贴图的程序直接粘。
 /// - CF_HDROP 文件：把图另存成临时 png，终端/资源管理器粘到的是这个文件路径。
@@ -2253,8 +2455,9 @@ mod tests {
         Annotation, App, Mode, PALETTE, Shape, TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR,
         TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, build_dib, color_u32, crop_image,
         draw_annotation_image, draw_line_image, draw_rect_image, gdi_text_size, normalized_rect,
-        palette_hit, palette_popup_rect, palette_swatch_rect, toolbar_hit, toolbar_item,
-        toolbar_item_rect, toolbar_item_slot, toolbar_origin, toolbar_size,
+        ocr_region, palette_hit, palette_popup_rect, palette_swatch_rect, prepare_ocr_rgba,
+        toolbar_hit, toolbar_item, toolbar_item_rect, toolbar_item_slot, toolbar_origin,
+        toolbar_size, unicode_text_bytes,
     };
     use xcap::image::RgbaImage;
 
@@ -2317,15 +2520,69 @@ mod tests {
 
     #[test]
     fn toolbar_slot_layout_matches_expectation() {
-        // 单行：4 个工具，COLOR 按钮，5 个动作
+        // 单行：4 个工具，COLOR 按钮，6 个动作
         assert_eq!(toolbar_item(0), ToolbarItem::Tool(Tool::Pen));
         assert_eq!(toolbar_item(1), ToolbarItem::Tool(Tool::Line));
         assert_eq!(toolbar_item(2), ToolbarItem::Tool(Tool::Rect));
         assert_eq!(toolbar_item(3), ToolbarItem::Tool(Tool::Text));
         assert_eq!(toolbar_item(4), ToolbarItem::Color);
         assert_eq!(toolbar_item(5), ToolbarItem::Action(ToolbarAction::Undo));
-        assert_eq!(toolbar_item(9), ToolbarItem::Action(ToolbarAction::Close));
+        assert_eq!(toolbar_item(7), ToolbarItem::Action(ToolbarAction::Ocr));
+        assert_eq!(toolbar_item(10), ToolbarItem::Action(ToolbarAction::Close));
         assert_eq!(toolbar_item_slot(ToolbarItem::Color), 4);
+        assert_eq!(
+            toolbar_item_slot(ToolbarItem::Action(ToolbarAction::Ocr)),
+            7
+        );
+    }
+
+    #[test]
+    fn toolbar_fits_a_640_pixel_wide_screen() {
+        assert!(toolbar_size().0 <= 640 - 16);
+    }
+
+    #[test]
+    fn ocr_uses_original_selected_rgba_pixels() {
+        let img = RgbaImage::from_fn(4, 3, |x, y| {
+            xcap::image::Rgba([(x * 20) as u8, (y * 30) as u8, 7, 255])
+        });
+        let (pixels, width, height) = prepare_ocr_rgba(&img, Some(((3, 2), (1, 0))), 100).unwrap();
+        assert_eq!((width, height), (2, 2));
+        assert_eq!(
+            pixels.as_ref(),
+            &[20, 0, 7, 255, 40, 0, 7, 255, 20, 30, 7, 255, 40, 30, 7, 255,]
+        );
+        assert_eq!(
+            ocr_region(&img, Some(((8, 9), (-2, 1)))),
+            Some((0, 1, 4, 2))
+        );
+    }
+
+    #[test]
+    fn ocr_input_scales_to_the_system_dimension_limit() {
+        let img = RgbaImage::new(8, 4);
+        let (pixels, width, height) = prepare_ocr_rgba(&img, None, 4).unwrap();
+        assert_eq!((width, height), (4, 2));
+        assert_eq!(pixels.len(), 4 * 2 * 4);
+    }
+
+    #[test]
+    fn full_image_ocr_input_reuses_the_original_buffer() {
+        let img = RgbaImage::new(8, 4);
+        let (pixels, width, height) = prepare_ocr_rgba(&img, None, 100).unwrap();
+        assert_eq!((width, height), img.dimensions());
+        assert!(matches!(pixels, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn unicode_clipboard_text_round_trips_chinese_and_emoji() {
+        let bytes = unicode_text_bytes("中文😀\nabc");
+        assert_eq!(&bytes[bytes.len() - 2..], &[0, 0]);
+        let utf16: Vec<u16> = bytes[..bytes.len() - 2]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&utf16).unwrap(), "中文😀\nabc");
     }
 
     #[test]
@@ -2519,6 +2776,22 @@ mod tests {
     }
 }
 
+fn show_message(message: &str, error: bool) {
+    let text = HSTRING::from(message);
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            w!("rshot"),
+            if error {
+                MB_ICONERROR
+            } else {
+                MB_ICONINFORMATION
+            },
+        );
+    }
+}
+
 fn main() {
     // release 版没控制台，启动出错会闷声退出；这里把错误弹窗告诉用户
     if let Err(e) = run() {
@@ -2541,6 +2814,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+    let _winrt = WinRtApartment::initialize()?;
 
     let cfg: Config = confy::load("RShot", None)?;
     let shot_key: HotKey = cfg.hotkey.parse()?;
