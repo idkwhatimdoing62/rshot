@@ -8,6 +8,25 @@ pub(super) enum Mode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CaptureFailureStage {
+    ReadCursor,
+    LocateCaptureMonitor,
+    MatchOverlayMonitor,
+    CaptureImage,
+}
+
+impl CaptureFailureStage {
+    pub(super) const fn code(self) -> &'static str {
+        match self {
+            Self::ReadCursor => "RSH-CAP-001",
+            Self::LocateCaptureMonitor => "RSH-CAP-002",
+            Self::MatchOverlayMonitor => "RSH-CAP-003",
+            Self::CaptureImage => "RSH-CAP-004",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SessionFailureStage {
     CreateWindow,
     CreateContext,

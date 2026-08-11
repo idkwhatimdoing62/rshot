@@ -77,7 +77,8 @@ impl ApplicationHandler for App {
             }
             if ev.id == self.quit_id {
                 event_loop.exit(); // 退出整个程序
-            } else if ev.id == self.shot_id && self.window.is_none() {
+            } else if ev.id == self.shot_id && self.window.is_none() && !self.capture_attempt_active
+            {
                 // 只限制活动截图会话；已有贴图不会阻止下一次截图。
                 self.open_overlay(event_loop);
             }

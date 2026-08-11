@@ -1,4 +1,5 @@
 mod clipboard;
+mod diagnostics;
 mod editor;
 mod geometry;
 mod handler;
@@ -9,6 +10,7 @@ mod state;
 mod windows_adapter;
 
 use clipboard::*;
+use diagnostics::*;
 use editor::*;
 use geometry::*;
 use ocr::*;
@@ -37,9 +39,11 @@ use xcap::Monitor;
 use xcap::image::RgbaImage;
 
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 struct Config {
     hotkey: String,
     quit: String,
+    diagnostics: bool,
 }
 
 impl Default for Config {
@@ -47,6 +51,7 @@ impl Default for Config {
         Config {
             hotkey: "Alt+A".into(),
             quit: "Alt+D".into(),
+            diagnostics: true,
         }
     }
 }
@@ -54,14 +59,15 @@ impl Default for Config {
 const AUTHOR: &str = "idkwhatimdoing62";
 const REPOSITORY_URL: &str = "https://github.com/idkwhatimdoing62/rshot";
 
-fn build_about_message(hotkey: &str, quit: &str) -> String {
+fn build_about_message(hotkey: &str, quit: &str, diagnostics: bool) -> String {
     format!(
-        "rshot v{}\n\n作者：{}\n项目：{}\n\n当前快捷键\n截图：{}\n退出：{}\n\n截图只能通过全局热键触发。\n修改配置后请重启程序。",
+        "rshot v{}\n\n作者：{}\n项目：{}\n\n当前设置\n截图热键：{}\n退出热键：{}\n诊断日志：{}\n\n截图只能通过全局热键触发。\n修改配置后请重启程序。",
         env!("CARGO_PKG_VERSION"),
         AUTHOR,
         REPOSITORY_URL,
         hotkey,
         quit,
+        if diagnostics { "开启" } else { "关闭" },
     )
 }
 
@@ -71,6 +77,8 @@ struct App {
     shot_id: u32,
     quit_id: u32,
     about_message: String,
+    diagnostics_enabled: bool,
+    capture_attempt_active: bool,
 
     // —— 以下是遮罩窗口的状态，只有正在框选时才有值 ——
     window: Option<Rc<dyn Window>>,
@@ -108,24 +116,62 @@ impl DerefMut for App {
 }
 
 impl App {
+    fn begin_capture_attempt(&mut self) {
+        self.close_overlay();
+        self.capture_attempt_active = true;
+    }
+
+    fn finish_capture_attempt(&mut self) {
+        self.capture_attempt_active = false;
+    }
+
     /// 截图热键触发：截鼠标那块屏 + 弹全屏遮罩，进入框选
     fn open_overlay(&mut self, event_loop: &dyn ActiveEventLoop) {
+        // 每个热键事件都是全新的尝试；先清掉任何不完整的旧会话。
+        self.begin_capture_attempt();
+
         // 1. 鼠标坐标（进程已 DPI aware，拿的是物理像素）
         let Some(cursor) = cursor_position() else {
+            self.handle_capture_failure(CaptureFailureStage::ReadCursor);
             return;
         };
         self.cursor = cursor;
 
-        // 2. 截鼠标所在屏：转成显示用像素 + 留一份原图
+        // 2. 分别定位截图后端和遮罩窗口使用的显示器。
         let Ok(monitor) = Monitor::from_point(cursor.0, cursor.1) else {
+            self.handle_capture_failure(CaptureFailureStage::LocateCaptureMonitor);
             return;
         };
+        let (cx, cy) = cursor;
+        let target = event_loop.available_monitors().find_map(|monitor| {
+            let (Some(position), Some(mode)) = (monitor.position(), monitor.current_video_mode())
+            else {
+                return None;
+            };
+            let size = mode.size();
+            if cx >= position.x
+                && cy >= position.y
+                && cx < position.x + size.width as i32
+                && cy < position.y + size.height as i32
+            {
+                Some((monitor, (position.x, position.y)))
+            } else {
+                None
+            }
+        });
+        let Some((target, origin)) = target else {
+            self.handle_capture_failure(CaptureFailureStage::MatchOverlayMonitor);
+            return;
+        };
+        self.origin = origin;
+
+        // 3. 截鼠标所在屏：隐藏旧贴图后获取并保留一份原始 RGBA。
         // 旧贴图在整个新会话期间保持隐藏，既不会进入截图，也不会盖住选择遮罩。
         self.set_pins_visible(false);
         let img = match monitor.capture_image() {
             Ok(img) => img,
             Err(_) => {
-                self.set_pins_visible(true);
+                self.handle_capture_failure(CaptureFailureStage::CaptureImage);
                 return;
             }
         };
@@ -134,30 +180,13 @@ impl App {
         self.sel = None;
         self.editor.reset_for_capture();
 
-        // 3. 找鼠标那块 winit 屏，建全屏无边框窗口钉上去
-        let (cx, cy) = self.cursor;
-        let target = event_loop.available_monitors().find(|m| {
-            let (Some(pos), Some(mode)) = (m.position(), m.current_video_mode()) else {
-                return false;
-            };
-            let size = mode.size();
-            cx >= pos.x
-                && cy >= pos.y
-                && cx < pos.x + size.width as i32
-                && cy < pos.y + size.height as i32
-        });
-        // 记下这块屏的左上角，做窗口坐标↔屏幕坐标换算
-        self.origin = target
-            .as_ref()
-            .and_then(|m| m.position())
-            .map(|pos| (pos.x, pos.y))
-            .unwrap_or((0, 0));
+        // 4. 建全屏无边框窗口钉到已经匹配的显示器。
         // 弹遮罩之前把所有可见窗口的矩形拍个快照（之后遮罩会盖住一切，就点不到底下窗口了）
         self.windows = visible_window_rects();
 
         let window: Rc<dyn Window> = match event_loop.create_window(
             WindowAttributes::default()
-                .with_fullscreen(Some(winit::monitor::Fullscreen::Borderless(target))),
+                .with_fullscreen(Some(winit::monitor::Fullscreen::Borderless(Some(target)))),
         ) {
             Ok(window) => Rc::from(window),
             Err(error) => {
@@ -196,6 +225,7 @@ impl App {
         window.request_redraw(); // 主动要首帧，否则黑底白窗
         self.window = Some(window);
         self.surface = Some(surface);
+        self.finish_capture_attempt();
     }
 
     /// 确认截图：至少一种图片格式写入成功才结束会话；全部失败则恢复编辑界面。
@@ -589,9 +619,34 @@ impl App {
             .map_err(|error| SessionFailure::new(SessionFailureStage::Present, error))
     }
 
+    fn take_capture_failure_notice(&mut self, stage: CaptureFailureStage) -> Option<String> {
+        if !self.capture_attempt_active {
+            return None;
+        }
+        self.close_overlay();
+        Some(format!("无法开始截图，请重试。\n错误码：{}", stage.code()))
+    }
+
+    fn handle_capture_failure(&mut self, stage: CaptureFailureStage) {
+        let Some(message) = self.take_capture_failure_notice(stage) else {
+            return;
+        };
+        if self.diagnostics_enabled && record_capture_failure(stage).is_err() {
+            // 诊断失败本身不能阻止恢复；这里只输出固定字段，不泄露路径或系统错误文本。
+            eprintln!(
+                "event=capture_diagnostic_write_failed code={}",
+                stage.code()
+            );
+        }
+        show_message(&message, true);
+    }
+
     /// 清理失败会话并返回是否真的存在活动资源；用于屏蔽旧事件造成的重复报错。
     fn recover_failed_session(&mut self) -> bool {
-        let was_active = self.window.is_some() || self.surface.is_some() || self.img.is_some();
+        let was_active = self.capture_attempt_active
+            || self.window.is_some()
+            || self.surface.is_some()
+            || self.img.is_some();
         self.close_overlay();
         was_active
     }
@@ -658,12 +713,18 @@ impl App {
     }
 
     fn clear_capture_state(&mut self) {
+        self.capture_attempt_active = false;
         self.img = None;
+        self.cursor = (0, 0);
         self.start = None;
+        self.cur = (0, 0);
         self.sel = None;
         self.windows = Vec::new();
+        self.origin = (0, 0);
         self.dragged = false;
         self.manual = false;
+        self.last_blink = None;
+        self.modifiers = ModifiersState::default();
         self.editor.reset_for_reselect();
     }
 
@@ -700,16 +761,17 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        Annotation, App, MAX_PINNED_WINDOWS, Mode, PALETTE, PublishedImageFormats, SessionFailure,
-        SessionFailureStage, Shape, TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT,
-        TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image,
-        build_about_message, build_dib, claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in,
+        Annotation, App, CaptureFailureStage, Config, MAX_PINNED_WINDOWS, Mode, PALETTE,
+        PublishedImageFormats, RectI, SessionFailure, SessionFailureStage, Shape,
+        TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR,
+        TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image, build_about_message,
+        build_dib, capture_failure_log_line, claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in,
         color_u32, crop_image, dragged_window_position, draw_annotation_image, draw_line_image,
         draw_rect_image, gdi_text_size, has_pin_capacity, image_clipboard_publish_succeeded,
         is_managed_temp_png, normalized_rect, ocr_region, palette_hit, palette_popup_rect,
-        palette_swatch_rect, prepare_ocr_rgba, toolbar_hit, toolbar_item, toolbar_item_rect,
-        toolbar_item_slot, toolbar_origin, toolbar_size, unicode_text_bytes,
-        write_unique_temp_png_in,
+        palette_swatch_rect, prepare_ocr_rgba, record_capture_failure_in, toolbar_hit,
+        toolbar_item, toolbar_item_rect, toolbar_item_slot, toolbar_origin, toolbar_size,
+        unicode_text_bytes, write_unique_temp_png_in,
     };
     use std::collections::HashSet;
     use std::fs::{self, FileTimes, OpenOptions};
@@ -723,12 +785,26 @@ mod tests {
 
     #[test]
     fn about_message_shows_author_and_loaded_hotkeys() {
-        let message = build_about_message("Ctrl+Shift+S", "Ctrl+Shift+Q");
+        let message = build_about_message("Ctrl+Shift+S", "Ctrl+Shift+Q", true);
 
         assert!(message.contains("idkwhatimdoing62"));
         assert!(message.contains("Ctrl+Shift+S"));
         assert!(message.contains("Ctrl+Shift+Q"));
+        assert!(message.contains("诊断日志：开启"));
         assert!(message.contains("截图只能通过全局热键触发"));
+    }
+
+    #[test]
+    fn existing_config_without_diagnostics_keeps_working() {
+        let dir = TestTempDir::new();
+        let path = dir.path().join("config.yml");
+        fs::write(&path, "hotkey: Alt+A\nquit: Alt+D\n").unwrap();
+
+        let config: Config = confy::load_path(&path).unwrap();
+
+        assert_eq!(config.hotkey, "Alt+A");
+        assert_eq!(config.quit, "Alt+D");
+        assert!(config.diagnostics);
     }
 
     #[test]
@@ -1147,6 +1223,137 @@ mod tests {
     }
 
     #[test]
+    fn capture_failures_use_stable_privacy_safe_codes() {
+        let stages = [
+            (CaptureFailureStage::ReadCursor, "RSH-CAP-001"),
+            (CaptureFailureStage::LocateCaptureMonitor, "RSH-CAP-002"),
+            (CaptureFailureStage::MatchOverlayMonitor, "RSH-CAP-003"),
+            (CaptureFailureStage::CaptureImage, "RSH-CAP-004"),
+        ];
+        for (stage, code) in stages {
+            assert_eq!(stage.code(), code);
+        }
+
+        let line = capture_failure_log_line(
+            CaptureFailureStage::CaptureImage,
+            UNIX_EPOCH + Duration::from_secs(123),
+        );
+        assert_eq!(
+            line,
+            "unix_seconds=123 event=capture_failed code=RSH-CAP-004\n"
+        );
+        assert!(!line.contains("cursor"));
+        assert!(!line.contains("monitor"));
+        assert!(!line.contains("window"));
+    }
+
+    #[test]
+    fn capture_diagnostic_log_stops_at_its_size_limit() {
+        let dir = TestTempDir::new();
+        let path = dir.path().join("capture-errors.log");
+        let now = UNIX_EPOCH + Duration::from_secs(456);
+        let line = capture_failure_log_line(CaptureFailureStage::ReadCursor, now);
+        let max_bytes = (line.len() * 2) as u64;
+
+        assert!(
+            record_capture_failure_in(&path, CaptureFailureStage::ReadCursor, now, max_bytes,)
+                .unwrap()
+        );
+        assert!(
+            record_capture_failure_in(&path, CaptureFailureStage::ReadCursor, now, max_bytes,)
+                .unwrap()
+        );
+        assert!(
+            !record_capture_failure_in(&path, CaptureFailureStage::ReadCursor, now, max_bytes,)
+                .unwrap()
+        );
+        assert_eq!(fs::metadata(&path).unwrap().len(), max_bytes);
+    }
+
+    #[test]
+    fn successful_capture_transition_finishes_the_entry_attempt() {
+        let mut app = App::default();
+
+        app.begin_capture_attempt();
+        assert!(app.capture_attempt_active);
+        app.finish_capture_attempt();
+
+        assert!(!app.capture_attempt_active);
+        assert!(
+            app.take_capture_failure_notice(CaptureFailureStage::CaptureImage)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn repeated_capture_failures_leave_no_old_session_and_keep_hotkeys() {
+        let mut app = App {
+            shot_id: 41,
+            quit_id: 42,
+            ..App::default()
+        };
+
+        for stage in [
+            CaptureFailureStage::ReadCursor,
+            CaptureFailureStage::CaptureImage,
+        ] {
+            app.img = Some(RgbaImage::new(8, 6));
+            app.cursor = (800, 600);
+            app.cur = (10, 12);
+            app.start = Some((1, 1));
+            app.sel = Some(((1, 1), (5, 4)));
+            app.windows.push(RectI {
+                left: 1,
+                top: 2,
+                right: 20,
+                bottom: 30,
+            });
+            app.origin = (100, 200);
+            app.dragged = true;
+            app.manual = true;
+            app.mode = Mode::Editing;
+            app.text_editing = true;
+            app.ime_preedit = String::from("secret text");
+            app.annotations.push(Annotation {
+                shape: Shape::Text((1, 1), String::from("private annotation")),
+                color: PALETTE[0],
+            });
+
+            app.begin_capture_attempt();
+            assert!(app.capture_attempt_active);
+            assert!(app.img.is_none());
+            assert!(app.sel.is_none());
+            assert!(app.annotations.is_empty());
+
+            let notice = app.take_capture_failure_notice(stage).unwrap();
+            assert!(notice.contains(stage.code()));
+            assert!(!notice.contains("secret text"));
+            assert!(!notice.contains("private annotation"));
+            assert!(!app.capture_attempt_active);
+            assert!(app.window.is_none());
+            assert!(app.surface.is_none());
+            assert!(app.img.is_none());
+            assert_eq!(app.cursor, (0, 0));
+            assert!(app.start.is_none());
+            assert_eq!(app.cur, (0, 0));
+            assert!(app.sel.is_none());
+            assert!(app.windows.is_empty());
+            assert_eq!(app.origin, (0, 0));
+            assert!(app.annotations.is_empty());
+            assert!(!app.dragged);
+            assert!(!app.manual);
+            assert!(!app.text_editing);
+            assert!(app.ime_preedit.is_empty());
+            assert_eq!(app.mode, Mode::Selecting);
+            assert_eq!(app.shot_id, 41);
+            assert_eq!(app.quit_id, 42);
+
+            // 同一次尝试的重复失败不重复提示；下一轮 begin 后会再次提示。
+            assert!(app.take_capture_failure_notice(stage).is_none());
+        }
+    }
+
+    #[test]
     fn failed_session_is_cleared_once_and_hotkeys_survive() {
         let mut app = App {
             shot_id: 41,
@@ -1315,7 +1522,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let cfg: Config = confy::load("RShot", None)?;
     let shot_key: HotKey = cfg.hotkey.parse()?;
     let quit_key: HotKey = cfg.quit.parse()?;
-    let about_message = build_about_message(&cfg.hotkey, &cfg.quit);
+    let about_message = build_about_message(&cfg.hotkey, &cfg.quit, cfg.diagnostics);
 
     // manager 要活到事件循环结束，否则热键会被注销，所以一直留在 main 作用域里
     let manager = GlobalHotKeyManager::new()?;
@@ -1340,6 +1547,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         shot_id: shot_key.id, // HotKey 是 Copy，register 后仍可取 id
         quit_id: quit_key.id,
         about_message,
+        diagnostics_enabled: cfg.diagnostics,
         ..Default::default()
     };
     event_loop.run_app(app)?;
