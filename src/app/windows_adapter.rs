@@ -28,7 +28,7 @@ use winit::window::Window;
 /// 主 UI 线程使用单线程 WinRT apartment；OCR 生命周期覆盖整个事件循环。
 pub(super) struct WinRtApartment;
 
-fn window_hwnd(window: &dyn Window) -> Option<HWND> {
+pub(super) fn window_hwnd(window: &dyn Window) -> Option<HWND> {
     let handle = window.window_handle().ok()?;
     match handle.as_raw() {
         RawWindowHandle::Win32(raw) => Some(HWND(raw.hwnd.get() as *mut c_void)),

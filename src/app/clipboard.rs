@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, POINT};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, POINT};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     SetClipboardData,
@@ -38,11 +38,11 @@ pub(super) fn unicode_text_bytes(text: &str) -> Vec<u8> {
         .collect()
 }
 
-pub(super) fn text_to_clipboard(text: &str) -> bool {
+pub(super) fn text_to_clipboard(text: &str, owner: HWND) -> bool {
     let bytes = unicode_text_bytes(text);
     let _clipboard_guard = lock_clipboard();
     unsafe {
-        if OpenClipboard(None).is_err() {
+        if OpenClipboard(Some(owner)).is_err() {
             return false;
         }
         if EmptyClipboard().is_err() {
@@ -57,9 +57,74 @@ pub(super) fn text_to_clipboard(text: &str) -> bool {
                 false
             }
         });
-        let _ = CloseClipboard();
-        success
+        let clipboard_closed = CloseClipboard().is_ok();
+        success && clipboard_closed
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct PublishedImageFormats {
+    dib: bool,
+    file: bool,
+}
+
+impl PublishedImageFormats {
+    pub(super) const fn new(dib: bool, file: bool) -> Self {
+        Self { dib, file }
+    }
+
+    pub(super) const fn any(self) -> bool {
+        self.dib || self.file
+    }
+
+    pub(super) const fn dib(self) -> bool {
+        self.dib
+    }
+
+    pub(super) const fn file(self) -> bool {
+        self.file
+    }
+
+    pub(super) const fn description(self) -> &'static str {
+        match (self.dib(), self.file()) {
+            (true, true) => "位图（CF_DIB）和 PNG 文件（CF_HDROP）",
+            (true, false) => "位图（CF_DIB）",
+            (false, true) => "PNG 文件（CF_HDROP）",
+            (false, false) => "无",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct ImageClipboardOutcome {
+    published: PublishedImageFormats,
+    clipboard_closed: bool,
+    failures: Vec<String>,
+}
+
+impl ImageClipboardOutcome {
+    pub(super) const fn succeeded(&self) -> bool {
+        image_clipboard_publish_succeeded(self.published, self.clipboard_closed)
+    }
+
+    pub(super) const fn published(&self) -> PublishedImageFormats {
+        self.published
+    }
+
+    pub(super) fn failure_message(&self) -> String {
+        if self.failures.is_empty() {
+            "未能写入任何剪贴板格式。".to_owned()
+        } else {
+            self.failures.join("\n")
+        }
+    }
+}
+
+pub(super) const fn image_clipboard_publish_succeeded(
+    published: PublishedImageFormats,
+    clipboard_closed: bool,
+) -> bool {
+    clipboard_closed && published.any()
 }
 
 pub(super) fn temp_cleanup_due(last_attempt: Option<Instant>, now: Instant) -> bool {
@@ -290,41 +355,76 @@ pub(super) fn cleanup_expired_temp_pngs(now: SystemTime) -> io::Result<usize> {
 /// 把截图放进剪贴板，同时挂两种格式：
 /// - CF_DIB 位图：微信/Word/画图 等能贴图的程序直接粘。
 /// - CF_HDROP 文件：每次使用唯一临时 PNG；未成功发布的文件立即删除。
-pub(super) fn image_to_clipboard(img: &RgbaImage) {
-    let png_path = write_unique_temp_png(img).ok();
+///
+/// 返回实际发布成功的格式；没有可用格式或剪贴板未正常关闭时，调用方保留会话并提示重试。
+pub(super) fn image_to_clipboard(img: &RgbaImage, owner: HWND) -> ImageClipboardOutcome {
+    let (png_path, mut failures) = match write_unique_temp_png(img) {
+        Ok(path) => (Some(path), Vec::new()),
+        Err(error) => (None, vec![format!("创建临时 PNG 失败：{error}")]),
+    };
     let hdrop = png_path.as_deref().map(build_hdrop);
     // PNG 编码完成后再构造 DIB，避免两份大块临时数据同时参与编码峰值。
     let dib = build_dib(img);
 
     let _clipboard_guard = lock_clipboard();
-    let hdrop_published = unsafe {
-        if OpenClipboard(None).is_err() {
-            false
-        } else {
-            let mut published = false;
-            if EmptyClipboard().is_ok() {
-                if let Some(h) = global_from_bytes(&dib) {
-                    if SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(h.0))).is_err() {
-                        let _ = GlobalFree(Some(h));
-                    }
-                }
-                if let Some(bytes) = hdrop {
-                    if let Some(h) = global_from_bytes(&bytes) {
-                        if SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(h.0))).is_ok() {
-                            published = true;
-                        } else {
-                            let _ = GlobalFree(Some(h));
+    let mut published = PublishedImageFormats::new(false, false);
+    let mut clipboard_closed = false;
+    unsafe {
+        match OpenClipboard(Some(owner)) {
+            Ok(()) => {
+                match EmptyClipboard() {
+                    Ok(()) => {
+                        match publish_clipboard_bytes(CF_DIB.0 as u32, &dib) {
+                            Ok(()) => published.dib = true,
+                            Err(error) => failures.push(format!("写入位图格式失败：{error}")),
+                        }
+                        if let Some(bytes) = hdrop.as_deref() {
+                            match publish_clipboard_bytes(CF_HDROP.0 as u32, bytes) {
+                                Ok(()) => published.file = true,
+                                Err(error) => {
+                                    failures.push(format!("写入 PNG 文件格式失败：{error}"))
+                                }
+                            }
                         }
                     }
+                    Err(error) => failures.push(format!("清空剪贴板失败：{error}")),
+                }
+                match CloseClipboard() {
+                    Ok(()) => clipboard_closed = true,
+                    Err(error) => failures.push(format!("关闭剪贴板失败：{error}")),
                 }
             }
-            let _ = CloseClipboard();
-            published
+            Err(error) => failures.push(format!("打开剪贴板失败：{error}")),
         }
+    }
+    if !published.file()
+        && let Some(path) = png_path
+    {
+        match fs::remove_file(&path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                eprintln!("无法删除未发布的临时 PNG {}：{error}", path.display());
+                failures.push(format!("删除未发布的临时 PNG 失败：{error}"));
+            }
+            _ => {}
+        }
+    }
+    ImageClipboardOutcome {
+        published,
+        clipboard_closed,
+        failures,
+    }
+}
+
+/// SetClipboardData 成功后 HGLOBAL 所有权转给系统；失败时仍由本进程释放。
+unsafe fn publish_clipboard_bytes(format: u32, data: &[u8]) -> Result<(), String> {
+    let Some(memory) = (unsafe { global_from_bytes(data) }) else {
+        return Err("分配剪贴板内存失败".to_owned());
     };
-    if !hdrop_published {
-        if let Some(path) = png_path {
-            let _ = fs::remove_file(path);
+    match unsafe { SetClipboardData(format, Some(HANDLE(memory.0))) } {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let _ = unsafe { GlobalFree(Some(memory)) };
+            Err(error.to_string())
         }
     }
 }

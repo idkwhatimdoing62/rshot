@@ -198,22 +198,52 @@ impl App {
         self.surface = Some(surface);
     }
 
-    /// 确认截图：手动拖出的框裁框，否则截整屏。截完进剪贴板并收起遮罩。
+    /// 确认截图：至少一种图片格式写入成功才结束会话；全部失败则恢复编辑界面。
     fn confirm(&mut self) {
-        if self.img.is_some() {
-            if let Some(w) = &self.window {
-                w.set_visible(false); // 先藏，编码耗时挪到看不见后
-            }
-            if self.sel.is_none() && self.annotations.is_empty() {
-                // 全屏且没有标注时直接使用原图，避免再克隆一份整屏 RGBA。
-                if let Some(img) = self.img.as_ref() {
-                    image_to_clipboard(img);
-                }
-            } else if let Some(img) = self.output_image() {
-                image_to_clipboard(&img);
-            }
+        self.commit_text();
+        let Some(owner) = self
+            .window
+            .as_ref()
+            .and_then(|window| window_hwnd(window.as_ref()))
+        else {
+            self.restore_after_image_copy_failure("无法获取截图窗口句柄。");
+            return;
+        };
+        if let Some(w) = &self.window {
+            w.set_visible(false); // 先藏，编码耗时挪到看不见后
         }
-        self.close_overlay();
+
+        let outcome = if self.sel.is_none() && self.annotations.is_empty() {
+            // 全屏且没有标注时直接使用原图，避免再克隆一份整屏 RGBA。
+            self.img.as_ref().map(|img| image_to_clipboard(img, owner))
+        } else {
+            self.output_image()
+                .map(|img| image_to_clipboard(&img, owner))
+        };
+
+        let Some(outcome) = outcome else {
+            self.restore_after_image_copy_failure("无法生成要复制的截图图像。");
+            return;
+        };
+        if outcome.succeeded() {
+            println!("图片已写入剪贴板：{}", outcome.published().description());
+            self.close_overlay();
+        } else {
+            self.restore_after_image_copy_failure(&outcome.failure_message());
+        }
+    }
+
+    fn restore_after_image_copy_failure(&self, detail: &str) {
+        show_message(
+            &format!(
+                "复制图片失败，当前截图和标注已保留。\n\n{detail}\n\n请稍后重试；若剪贴板被其他程序占用，请先关闭相关程序。"
+            ),
+            true,
+        );
+        if let Some(window) = &self.window {
+            window.set_visible(true);
+            window.request_redraw();
+        }
     }
 
     fn output_image(&self) -> Option<RgbaImage> {
@@ -226,6 +256,10 @@ impl App {
         let Some(img) = self.img.as_ref() else {
             return;
         };
+        let clipboard_owner = self
+            .window
+            .as_ref()
+            .and_then(|window| window_hwnd(window.as_ref()));
         if let Some(w) = &self.window {
             w.set_visible(false);
         }
@@ -239,7 +273,9 @@ impl App {
                     w.request_redraw();
                 }
             }
-            Ok(text) if text_to_clipboard(&text) => self.close_overlay(),
+            Ok(text) if clipboard_owner.is_some_and(|owner| text_to_clipboard(&text, owner)) => {
+                self.close_overlay()
+            }
             Ok(_) => {
                 show_message("文字已识别，但写入剪贴板失败，请重试。", true);
                 if let Some(w) = &self.window {
@@ -664,15 +700,16 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        Annotation, App, MAX_PINNED_WINDOWS, Mode, PALETTE, SessionFailure, SessionFailureStage,
-        Shape, TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR,
-        TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image, build_about_message,
-        build_dib, claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in, color_u32, crop_image,
-        dragged_window_position, draw_annotation_image, draw_line_image, draw_rect_image,
-        gdi_text_size, has_pin_capacity, is_managed_temp_png, normalized_rect, ocr_region,
-        palette_hit, palette_popup_rect, palette_swatch_rect, prepare_ocr_rgba, toolbar_hit,
-        toolbar_item, toolbar_item_rect, toolbar_item_slot, toolbar_origin, toolbar_size,
-        unicode_text_bytes, write_unique_temp_png_in,
+        Annotation, App, MAX_PINNED_WINDOWS, Mode, PALETTE, PublishedImageFormats, SessionFailure,
+        SessionFailureStage, Shape, TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT,
+        TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image,
+        build_about_message, build_dib, claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in,
+        color_u32, crop_image, dragged_window_position, draw_annotation_image, draw_line_image,
+        draw_rect_image, gdi_text_size, has_pin_capacity, image_clipboard_publish_succeeded,
+        is_managed_temp_png, normalized_rect, ocr_region, palette_hit, palette_popup_rect,
+        palette_swatch_rect, prepare_ocr_rgba, toolbar_hit, toolbar_item, toolbar_item_rect,
+        toolbar_item_slot, toolbar_origin, toolbar_size, unicode_text_bytes,
+        write_unique_temp_png_in,
     };
     use std::collections::HashSet;
     use std::fs::{self, FileTimes, OpenOptions};
@@ -782,6 +819,30 @@ mod tests {
         assert_eq!(d[14], 24); // biBitCount 低字节
         // 像素段：红 → B,G,R = 0,0,255；绿 → 0,255,0
         assert_eq!(&d[40..46], &[0, 0, 255, 0, 255, 0]);
+    }
+
+    #[test]
+    fn image_copy_closes_only_after_a_format_is_published_and_clipboard_is_closed() {
+        let none = PublishedImageFormats::new(false, false);
+        let dib_only = PublishedImageFormats::new(true, false);
+        let file_only = PublishedImageFormats::new(false, true);
+        let both = PublishedImageFormats::new(true, true);
+
+        assert!(!image_clipboard_publish_succeeded(none, true));
+        assert!(image_clipboard_publish_succeeded(dib_only, true));
+        assert!(image_clipboard_publish_succeeded(file_only, true));
+        assert!(image_clipboard_publish_succeeded(both, true));
+        assert!(!image_clipboard_publish_succeeded(dib_only, false));
+        assert!(!image_clipboard_publish_succeeded(file_only, false));
+        assert!(!image_clipboard_publish_succeeded(both, false));
+        assert!(dib_only.dib());
+        assert!(!dib_only.file());
+        assert!(!file_only.dib());
+        assert!(file_only.file());
+        assert_eq!(none.description(), "无");
+        assert_eq!(dib_only.description(), "位图（CF_DIB）");
+        assert_eq!(file_only.description(), "PNG 文件（CF_HDROP）");
+        assert_eq!(both.description(), "位图（CF_DIB）和 PNG 文件（CF_HDROP）");
     }
 
     #[test]
