@@ -1,5 +1,68 @@
 use super::*;
 
+impl App {
+    fn handle_pinned_window_event(&mut self, id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => {
+                self.close_pin(id);
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && matches!(event.logical_key, Key::Named(NamedKey::Escape)) =>
+            {
+                self.close_pin(id);
+            }
+            WindowEvent::PointerMoved { position, .. } => {
+                if let Some(pin) = self.pins.get_mut(&id) {
+                    pin.set_cursor((position.x as i32, position.y as i32));
+                    if let Some(cursor) = cursor_position() {
+                        pin.drag_to(cursor);
+                    }
+                }
+            }
+            WindowEvent::PointerButton { state, button, .. } => {
+                let mouse_button = button.mouse_button();
+                if mouse_button == Some(MouseButton::Right) && state == ElementState::Released {
+                    self.close_pin(id);
+                    return;
+                }
+                if mouse_button != Some(MouseButton::Left) {
+                    return;
+                }
+                match state {
+                    ElementState::Pressed => {
+                        let close_hit = self
+                            .pins
+                            .get(&id)
+                            .is_some_and(PinnedWindow::close_button_hit);
+                        if close_hit {
+                            self.close_pin(id);
+                            return;
+                        }
+                        if let (Some(pin), Some(cursor)) =
+                            (self.pins.get_mut(&id), cursor_position())
+                        {
+                            pin.begin_drag(cursor);
+                        }
+                    }
+                    ElementState::Released => {
+                        if let Some(pin) = self.pins.get_mut(&id) {
+                            pin.end_drag();
+                        }
+                    }
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                let failure = self.pins.get_mut(&id).and_then(|pin| pin.redraw().err());
+                if let Some(failure) = failure {
+                    self.handle_pin_failure(id, failure);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 impl ApplicationHandler for App {
     // 本程序不在启动时建窗口，遮罩是热键触发后临时建的，这里留空
     fn can_create_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {}
@@ -15,7 +78,7 @@ impl ApplicationHandler for App {
             if ev.id == self.quit_id {
                 event_loop.exit(); // 退出整个程序
             } else if ev.id == self.shot_id && self.window.is_none() {
-                // 没在框选时才响应，避免叠窗
+                // 只限制活动截图会话；已有贴图不会阻止下一次截图。
                 self.open_overlay(event_loop);
             }
         }
@@ -58,6 +121,10 @@ impl ApplicationHandler for App {
         id: WindowId,
         event: WindowEvent,
     ) {
+        if self.pins.contains_key(&id) {
+            self.handle_pinned_window_event(id, event);
+            return;
+        }
         let Some(window) = self.window.as_ref() else {
             return;
         };
@@ -112,9 +179,7 @@ impl ApplicationHandler for App {
                         }
                         return;
                     }
-                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyP)
-                        && self.mode != Mode::Pinned
-                    {
+                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyP) {
                         self.pin();
                         return;
                     }
@@ -176,9 +241,7 @@ impl ApplicationHandler for App {
                         self.copy_ocr_text();
                         return;
                     }
-                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyC)
-                        && self.mode != Mode::Pinned
-                    {
+                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyC) {
                         self.confirm();
                         return;
                     }
@@ -281,18 +344,6 @@ impl ApplicationHandler for App {
                     } else if hover_changed || palette_changed {
                         if let Some(w) = &self.window {
                             w.request_redraw();
-                        }
-                    }
-                    return;
-                }
-                if self.mode == Mode::Pinned {
-                    if let Some((cursor_start, window_start)) = self.pin_drag {
-                        if let Some(cursor) = cursor_position() {
-                            if let Some(w) = &self.window {
-                                let x = window_start.0 + cursor.0 - cursor_start.0;
-                                let y = window_start.1 + cursor.1 - cursor_start.1;
-                                w.set_outer_position(PhysicalPosition::new(x, y).into());
-                            }
                         }
                     }
                     return;
@@ -403,43 +454,6 @@ impl ApplicationHandler for App {
                         self.toolbar_pressed = None;
                         self.palette_pressed = None;
                     }
-                }
-                if self.mode == Mode::Pinned {
-                    if mb == Some(MouseButton::Right) && state == ElementState::Released {
-                        self.close_overlay();
-                    } else if mb == Some(MouseButton::Left) {
-                        let close_hit = self
-                            .window
-                            .as_ref()
-                            .map(|w| {
-                                let size = w.surface_size();
-                                let r = pin_close_rect(size.width as i32, size.height as i32);
-                                self.cur.0 >= r.0
-                                    && self.cur.0 < r.2
-                                    && self.cur.1 >= r.1
-                                    && self.cur.1 < r.3
-                            })
-                            .unwrap_or(false);
-                        match state {
-                            ElementState::Pressed => {
-                                if close_hit {
-                                    self.close_overlay();
-                                    return;
-                                }
-                                if let Some(cursor) = cursor_position() {
-                                    if let Some(pos) =
-                                        self.window.as_ref().and_then(|w| w.outer_position().ok())
-                                    {
-                                        self.pin_drag = Some((cursor, (pos.x, pos.y)));
-                                    }
-                                }
-                            }
-                            ElementState::Released => {
-                                self.pin_drag = None;
-                            }
-                        }
-                    }
-                    return;
                 }
                 // 右键抬起 = 确认（有手动框裁框，否则全屏）。
                 // 必须等抬起：若按下就关遮罩，抬起那半下会漏给下面窗口，触发系统右键菜单

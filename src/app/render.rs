@@ -3,6 +3,36 @@ use super::geometry::{crop_image, normalized_rect};
 use super::windows_adapter::{TEXT_FONT_HEIGHT, gdi_render_text_rgba, gdi_text_size};
 use xcap::image::RgbaImage;
 
+/// 把 RGBA 图像铺进 softbuffer 的 0RGB 缓冲。窗口大于图像时，多余区域清黑。
+pub(super) fn blit_rgba_image(
+    buffer: &mut [u32],
+    surface_width: u32,
+    surface_height: u32,
+    image: &RgbaImage,
+) {
+    let surface_width = surface_width as usize;
+    let surface_height = surface_height as usize;
+    let image_width = image.width() as usize;
+    let image_height = image.height() as usize;
+    let required = surface_width.saturating_mul(surface_height);
+    if buffer.len() < required {
+        return;
+    }
+    if image_width != surface_width || image_height != surface_height {
+        buffer[..required].fill(0);
+    }
+    let copy_width = image_width.min(surface_width);
+    let raw = image.as_raw();
+    for y in 0..image_height.min(surface_height) {
+        let source = &raw[y * image_width * 4..(y * image_width + copy_width) * 4];
+        let target = &mut buffer[y * surface_width..y * surface_width + copy_width];
+        for (x, pixel) in target.iter_mut().enumerate() {
+            let i = x * 4;
+            *pixel = (source[i] as u32) << 16 | (source[i + 1] as u32) << 8 | source[i + 2] as u32;
+        }
+    }
+}
+
 /// 裁剪原图并按顺序合成标注。这里不接触窗口、Surface 或剪贴板。
 pub(super) fn compose_output(
     image: &RgbaImage,

@@ -3,6 +3,7 @@ mod editor;
 mod geometry;
 mod handler;
 mod ocr;
+mod pinned;
 mod render;
 mod state;
 mod windows_adapter;
@@ -11,6 +12,7 @@ use clipboard::*;
 use editor::*;
 use geometry::*;
 use ocr::*;
+use pinned::*;
 use render::*;
 use state::*;
 use windows_adapter::*;
@@ -18,6 +20,7 @@ use windows_adapter::*;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use serde::{Deserialize, Serialize};
 use softbuffer::{Context, Surface};
+use std::collections::HashMap;
 use std::error::Error;
 use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
@@ -86,7 +89,7 @@ struct App {
     editor: EditorState,
     last_blink: Option<Instant>,
     modifiers: ModifiersState,
-    pin_drag: Option<((i32, i32), (i32, i32))>,
+    pins: HashMap<WindowId, PinnedWindow>,
     last_temp_cleanup: Option<Instant>,
 }
 
@@ -117,14 +120,19 @@ impl App {
         let Ok(monitor) = Monitor::from_point(cursor.0, cursor.1) else {
             return;
         };
-        let Ok(img) = monitor.capture_image() else {
-            return;
+        // 旧贴图在整个新会话期间保持隐藏，既不会进入截图，也不会盖住选择遮罩。
+        self.set_pins_visible(false);
+        let img = match monitor.capture_image() {
+            Ok(img) => img,
+            Err(_) => {
+                self.set_pins_visible(true);
+                return;
+            }
         };
         self.img = Some(img);
         self.start = None; // 每次开都重置框选
         self.sel = None;
         self.editor.reset_for_capture();
-        self.pin_drag = None;
 
         // 3. 找鼠标那块 winit 屏，建全屏无边框窗口钉上去
         let (cx, cy) = self.cursor;
@@ -250,9 +258,32 @@ impl App {
     }
 
     fn pin(&mut self) {
+        if !has_pin_capacity(self.pins.len()) {
+            if let Some(window) = &self.window {
+                window.set_visible(false);
+            }
+            show_message(
+                &format!(
+                    "最多同时保留 {MAX_PINNED_WINDOWS} 张置顶贴图。\n请取消当前截图，关闭一张旧贴图后再试。"
+                ),
+                false,
+            );
+            if let Some(window) = &self.window {
+                window.set_visible(true);
+                window.request_redraw();
+            }
+            return;
+        }
         let Some(window) = self.window.as_ref().cloned() else {
             return;
         };
+        if self.surface.is_none() {
+            self.handle_session_failure(SessionFailure::new(
+                SessionFailureStage::AccessSurface,
+                "活动截图窗口没有对应的绘图表面",
+            ));
+            return;
+        }
         let out = if self.sel.is_none() && self.annotations.is_empty() {
             // 没有裁剪/标注时直接转移所有权，不再复制整屏。
             let Some(img) = self.img.take() else {
@@ -272,23 +303,39 @@ impl App {
             .unwrap_or(PhysicalPosition::new(self.origin.0, self.origin.1));
         // 给右上角关闭按钮留出最小可点击区域，极小选区也不会丢失控制入口。
         let size = PhysicalSize::new(out.width().max(56), out.height().max(44));
-        self.img = Some(out);
-        self.sel = None;
-        self.annotations.clear();
-        self.drawing = false;
-        self.toolbar_hover = None;
-        self.toolbar_pressed = None;
-        self.text_editing = false;
-        self.ime_preedit.clear();
-        self.close_palette();
-        self.mode = Mode::Pinned;
-        self.pin_drag = None;
         window.set_fullscreen(None);
         window.set_decorations(false);
         window.set_window_level(WindowLevel::AlwaysOnTop);
         let _ = window.request_surface_size(size.into());
         window.set_outer_position(pos.into());
-        window.request_redraw();
+
+        let Some(surface) = self.surface.take() else {
+            self.handle_session_failure(SessionFailure::new(
+                SessionFailureStage::AccessSurface,
+                "转换贴图时绘图表面已经失效",
+            ));
+            return;
+        };
+        let Some(window) = self.window.take() else {
+            self.surface = Some(surface);
+            self.handle_session_failure(SessionFailure::new(
+                SessionFailureStage::CreateWindow,
+                "转换贴图时活动窗口已经失效",
+            ));
+            return;
+        };
+        let id = window.id();
+        self.clear_capture_state();
+        if let Some(replaced) = self
+            .pins
+            .insert(id, PinnedWindow::new(surface, window, out))
+        {
+            replaced.close();
+        }
+        self.set_pins_visible(true);
+        if let Some(pin) = self.pins.get(&id) {
+            pin.request_redraw();
+        }
     }
 
     fn apply_toolbar_item(&mut self, item: ToolbarItem) {
@@ -443,26 +490,8 @@ impl App {
             .buffer_mut()
             .map_err(|error| SessionFailure::new(SessionFailureStage::AcquireBuffer, error))?;
 
-        // 逐行铺冻屏：按“截图宽度”对齐每一行。
-        // 若用一维 copy，一旦窗口宽 ≠ 截图宽，整幅会斜掉（右边错位）
         if let Some(img) = &self.img {
-            let iw = img.width() as usize;
-            let ih = img.height() as usize;
-            let sw = w.get() as usize;
-            let sh = h.get() as usize;
-            if iw != sw || ih != sh {
-                buffer.fill(0); // 尺寸不齐时先铺黑，右/下留边不显示脏数据
-            }
-            let copy_w = iw.min(sw);
-            let raw = img.as_raw();
-            for y in 0..ih.min(sh) {
-                let src = &raw[y * iw * 4..(y * iw + copy_w) * 4];
-                let dst = &mut buffer[y * sw..y * sw + copy_w];
-                for x in 0..copy_w {
-                    let i = x * 4;
-                    dst[x] = (src[i] as u32) << 16 | (src[i + 1] as u32) << 8 | src[i + 2] as u32;
-                }
-            }
+            blit_rgba_image(&mut buffer[..], w.get(), h.get(), img);
         }
         if let Some((a, b)) = self.sel {
             shade_outside(&mut buffer[..], w.get(), h.get(), a, b);
@@ -516,8 +545,6 @@ impl App {
                     editor.palette_hover,
                 );
             }
-        } else if editor.mode == Mode::Pinned {
-            draw_pin_controls(&mut buffer[..], w.get(), h.get());
         } else {
             draw_select_badge(&mut buffer[..], w.get(), h.get());
         }
@@ -548,6 +575,36 @@ impl App {
         }
     }
 
+    fn handle_pin_failure(&mut self, id: WindowId, failure: SessionFailure) {
+        if self.close_pin(id) {
+            show_message(
+                &format!("一张置顶贴图发生错误，已单独关闭。\n\n{failure}"),
+                true,
+            );
+        }
+    }
+
+    fn close_pin(&mut self, id: WindowId) -> bool {
+        let Some(pin) = self.pins.remove(&id) else {
+            return false;
+        };
+        pin.close();
+        true
+    }
+
+    fn set_pins_visible(&mut self, visible: bool) {
+        if self.pins.is_empty() {
+            return;
+        }
+        for pin in self.pins.values_mut() {
+            if !visible {
+                pin.end_drag();
+            }
+            pin.set_visible(visible);
+        }
+        flush_window_compositor();
+    }
+
     fn cleanup_temp_files_if_due(&mut self, now: Instant) {
         if !claim_temp_cleanup_slot(&mut self.last_temp_cleanup, now) {
             return;
@@ -564,14 +621,7 @@ impl App {
         }
     }
 
-    /// 关掉遮罩窗口，回后台待命（不退程序）。丢掉所有 Rc，窗口即被销毁
-    fn close_overlay(&mut self) {
-        // Surface 可能持有窗口句柄，先释放它，再释放窗口。
-        if let Some(window) = self.window.as_ref() {
-            window.set_visible(false);
-        }
-        drop(self.surface.take());
-        drop(self.window.take());
+    fn clear_capture_state(&mut self) {
         self.img = None;
         self.start = None;
         self.sel = None;
@@ -579,7 +629,18 @@ impl App {
         self.dragged = false;
         self.manual = false;
         self.editor.reset_for_reselect();
-        self.pin_drag = None;
+    }
+
+    /// 关掉活动截图窗口，回后台待命；已有贴图恢复显示且不被销毁。
+    fn close_overlay(&mut self) {
+        // Surface 可能持有窗口句柄，先释放它，再释放窗口。
+        if let Some(window) = self.window.as_ref() {
+            window.set_visible(false);
+        }
+        drop(self.surface.take());
+        drop(self.window.take());
+        self.clear_capture_state();
+        self.set_pins_visible(true);
     }
 
     /// 光标当前所在的窗口矩形（转成窗口内坐标）。没命中返回 None
@@ -603,15 +664,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        Annotation, App, Mode, PALETTE, SessionFailure, SessionFailureStage, Shape,
-        TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR,
-        TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, build_about_message, build_dib,
-        claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in, color_u32, crop_image,
-        draw_annotation_image, draw_line_image, draw_rect_image, gdi_text_size,
-        is_managed_temp_png, normalized_rect, ocr_region, palette_hit, palette_popup_rect,
-        palette_swatch_rect, prepare_ocr_rgba, toolbar_hit, toolbar_item, toolbar_item_rect,
-        toolbar_item_slot, toolbar_origin, toolbar_size, unicode_text_bytes,
-        write_unique_temp_png_in,
+        Annotation, App, MAX_PINNED_WINDOWS, Mode, PALETTE, SessionFailure, SessionFailureStage,
+        Shape, TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR,
+        TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image, build_about_message,
+        build_dib, claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in, color_u32, crop_image,
+        dragged_window_position, draw_annotation_image, draw_line_image, draw_rect_image,
+        gdi_text_size, has_pin_capacity, is_managed_temp_png, normalized_rect, ocr_region,
+        palette_hit, palette_popup_rect, palette_swatch_rect, prepare_ocr_rgba, toolbar_hit,
+        toolbar_item, toolbar_item_rect, toolbar_item_slot, toolbar_origin, toolbar_size,
+        unicode_text_bytes, write_unique_temp_png_in,
     };
     use std::collections::HashSet;
     use std::fs::{self, FileTimes, OpenOptions};
@@ -631,6 +692,33 @@ mod tests {
         assert!(message.contains("Ctrl+Shift+S"));
         assert!(message.contains("Ctrl+Shift+Q"));
         assert!(message.contains("截图只能通过全局热键触发"));
+    }
+
+    #[test]
+    fn pin_capacity_accepts_eight_but_rejects_the_ninth() {
+        assert!(has_pin_capacity(0));
+        assert!(has_pin_capacity(MAX_PINNED_WINDOWS - 1));
+        assert!(!has_pin_capacity(MAX_PINNED_WINDOWS));
+        assert!(!has_pin_capacity(MAX_PINNED_WINDOWS + 1));
+    }
+
+    #[test]
+    fn pinned_window_drag_preserves_the_initial_pointer_offset() {
+        assert_eq!(
+            dragged_window_position((100, 80), (400, 300), (125, 110)),
+            (425, 330)
+        );
+    }
+
+    #[test]
+    fn rgba_blit_copies_rows_and_clears_unused_pin_area() {
+        let image = RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255])
+            .expect("valid test image");
+        let mut buffer = vec![u32::MAX; 6];
+
+        blit_rgba_image(&mut buffer, 3, 2, &image);
+
+        assert_eq!(buffer, vec![0x00FF0000, 0x0000FF00, 0, 0, 0, 0]);
     }
 
     struct TestTempDir {
@@ -1007,7 +1095,6 @@ mod tests {
             sel: Some(((1, 1), (5, 4))),
             dragged: true,
             manual: true,
-            pin_drag: Some(((1, 1), (2, 2))),
             ..App::default()
         };
         app.mode = Mode::Editing;
@@ -1037,7 +1124,6 @@ mod tests {
         assert!(!app.palette_open);
         assert!(!app.text_editing);
         assert!(app.ime_preedit.is_empty());
-        assert!(app.pin_drag.is_none());
         assert_eq!(app.mode, Mode::Selecting);
         assert_eq!(app.shot_id, 41);
         assert_eq!(app.quit_id, 42);

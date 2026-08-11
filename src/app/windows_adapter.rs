@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use tray_icon::Icon;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
@@ -19,12 +19,39 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetCursorPos, GetWindowRect, IsIconic, IsWindowVisible, MB_ICONERROR,
-    MB_ICONINFORMATION, MessageBoxW,
+    MB_ICONINFORMATION, MessageBoxW, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use winit::window::Window;
 
 /// 主 UI 线程使用单线程 WinRT apartment；OCR 生命周期覆盖整个事件循环。
 pub(super) struct WinRtApartment;
+
+fn window_hwnd(window: &dyn Window) -> Option<HWND> {
+    let handle = window.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(raw) => Some(HWND(raw.hwnd.get() as *mut c_void)),
+        _ => None,
+    }
+}
+
+/// 隐藏或恢复贴图时不激活窗口，避免截图结束后从原应用抢走焦点。
+pub(super) fn set_window_visible_without_activation(window: &dyn Window, visible: bool) {
+    if let Some(hwnd) = window_hwnd(window) {
+        unsafe {
+            let _ = ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        }
+    } else {
+        window.set_visible(visible);
+    }
+}
+
+pub(super) fn flush_window_compositor() {
+    unsafe {
+        let _ = DwmFlush();
+    }
+}
 
 impl WinRtApartment {
     pub(super) fn initialize() -> windows::core::Result<Self> {

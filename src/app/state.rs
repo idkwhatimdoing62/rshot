@@ -5,7 +5,6 @@ pub(super) enum Mode {
     #[default]
     Selecting,
     Editing,
-    Pinned,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
