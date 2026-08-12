@@ -528,6 +528,23 @@ impl App {
         }
     }
 
+    fn finish_selection_gesture(&mut self, was_drag: bool) {
+        if was_drag && !selection_has_area(self.sel) {
+            // 横向或纵向拖动虽然越过了拖动阈值，但没有形成矩形面积。
+            // 留在选择态，并立即恢复光标下窗口的自动锁定。
+            self.mode = Mode::Selecting;
+            self.manual = false;
+            self.sel = self.window_under_cursor();
+            return;
+        }
+        if self.sel.is_some() {
+            self.manual = true;
+            self.mode = Mode::Editing;
+            self.toolbar_hover = None;
+            self.toolbar_pressed = None;
+        }
+    }
+
     fn redraw_session(&mut self, window_id: WindowId) -> Result<(), SessionFailure> {
         let Some(window) = self.window.as_ref().cloned() else {
             // 窗口关闭后仍可能收到已经排队的 RedrawRequested；直接忽略。
@@ -927,6 +944,8 @@ mod tests {
         let cropped = crop_image(&img, (9, 7), (-3, 2)).unwrap();
         assert_eq!(cropped.dimensions(), (9, 5));
         assert_eq!(normalized_rect(((9, 7), (-3, 2))), (-3, 2, 9, 7));
+        assert!(crop_image(&img, (1, 3), (8, 3)).is_none());
+        assert!(crop_image(&img, (4, 1), (4, 7)).is_none());
     }
 
     #[test]
@@ -1106,6 +1125,44 @@ mod tests {
         assert!(app.sel.is_none());
         assert!(app.annotations.is_empty());
         assert_eq!(app.tool, Tool::Line);
+    }
+
+    #[test]
+    fn zero_area_drag_stays_selecting_and_restores_window_lock() {
+        for selection in [Some(((10, 20), (80, 20))), Some(((20, 10), (20, 80)))] {
+            let mut app = App {
+                cur: (50, 50),
+                sel: selection,
+                manual: true,
+                windows: vec![RectI {
+                    left: 10,
+                    top: 10,
+                    right: 100,
+                    bottom: 100,
+                }],
+                ..Default::default()
+            };
+
+            app.finish_selection_gesture(true);
+
+            assert_eq!(app.mode, Mode::Selecting);
+            assert!(!app.manual);
+            assert_eq!(app.sel, Some(((11, 11), (99, 99))));
+        }
+    }
+
+    #[test]
+    fn positive_area_drag_enters_editing() {
+        let mut app = App {
+            // 反向拖动形成的 1px 高选区仍是有效矩形。
+            sel: Some(((80, 21), (10, 20))),
+            ..Default::default()
+        };
+
+        app.finish_selection_gesture(true);
+
+        assert_eq!(app.mode, Mode::Editing);
+        assert!(app.manual);
     }
 
     #[test]

@@ -492,22 +492,8 @@ impl ApplicationHandler for App {
                             let was_drag = self.dragged;
                             self.start = None;
                             self.dragged = false;
-                            if !was_drag {
-                                // 单击锁定窗口后进入编辑态，避免误触直接结束。
-                                if self.sel.is_some() {
-                                    self.manual = true;
-                                    self.mode = Mode::Editing;
-                                    self.toolbar_hover = None;
-                                    self.toolbar_pressed = None;
-                                }
-                            }
-                            // 拖框后进入编辑态：工具栏选工具/颜色，左键画标注。
-                            else {
-                                self.manual = true;
-                                self.mode = Mode::Editing;
-                                self.toolbar_hover = None;
-                                self.toolbar_pressed = None;
-                            }
+                            // 单击锁定窗口，或有效拖框后进入编辑态；零面积拖框继续选择。
+                            self.finish_selection_gesture(was_drag);
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }

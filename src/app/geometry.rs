@@ -17,6 +17,11 @@ pub(super) fn point_in_selection(p: (i32, i32), sel: Option<((i32, i32), (i32, i
         .is_some_and(|r| p.0 >= r.0 && p.0 <= r.2 && p.1 >= r.1 && p.1 <= r.3)
 }
 
+pub(super) fn selection_has_area(sel: Option<((i32, i32), (i32, i32))>) -> bool {
+    sel.map(normalized_rect)
+        .is_some_and(|(left, top, right, bottom)| right > left && bottom > top)
+}
+
 /// 按对角两点 a、b 从原图裁出子矩形，进剪贴板。零尺寸就跳过。
 pub(super) fn crop_image(img: &RgbaImage, a: (i32, i32), b: (i32, i32)) -> Option<RgbaImage> {
     let (iw, ih) = (img.width() as i32, img.height() as i32);
