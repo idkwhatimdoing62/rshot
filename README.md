@@ -2,7 +2,7 @@
 
 一个轻量的 Windows 截图工具，使用 Rust 编写。支持冻屏框选、窗口自动锁定、图片文字识别、画笔标注、置顶贴图、托盘常驻和全局热键。
 
-**[下载最新版本 rshot.exe](https://github.com/idkwhatimdoing62/rshot/releases/latest/download/rshot.exe)**
+**[下载 v0.2.15 完整 ZIP（推荐）](https://github.com/idkwhatimdoing62/rshot/releases/download/v0.2.15/rshot-v0.2.15-windows-x64.zip)**  ·  [仅下载最新版 rshot.exe](https://github.com/idkwhatimdoing62/rshot/releases/latest/download/rshot.exe)
 
 当前稳定版为 **[v0.2.15](https://github.com/idkwhatimdoing62/rshot/releases/tag/v0.2.15)**。该版本已启用完全离线的 PP-OCRv6 高精度识别路径，并通过 60 项自动测试、便携 Release 构建、依赖审计和真实模型推理烟测。
 
@@ -57,7 +57,7 @@ cargo run
 cargo build --release
 ```
 
-Release 产物位于 `target\release\rshot.exe`，双击后在后台运行。项目的 Windows MSVC 构建默认使用静态 CRT；正式便携 Release 还应通过 `RSHOT_OCR_RUNTIME_DIR` 嵌入使用 `/MT` 构建并通过依赖审计的 ONNX Runtime。
+`cargo build --release` 的普通本机构建产物位于 `target\release\rshot.exe`，双击后在后台运行。项目的 Windows MSVC 构建默认使用静态 CRT；正式便携 Release 使用下述脚本，通过 `RSHOT_OCR_RUNTIME_DIR` 嵌入以 `/MT` 构建的 ONNX Runtime，并执行依赖审计和真实模型推理烟测。
 
 准备好使用 `--enable_msvc_static_runtime` 构建的 ONNX Runtime 1.28.0 CPU DLL 后，用发布脚本生成 SHA-256 清单，验证 x64 架构、ONNX Runtime 版本与 API 导出，按 Windows 系统 DLL 白名单审计主程序和两份运行时 DLL，并用真实模型推理烟测最终制品：
 
@@ -68,6 +68,8 @@ Release 产物位于 `target\release\rshot.exe`，双击后在后台运行。项
 脚本显式锁定 `x86_64-pc-windows-msvc`，最终便携产物位于 `target\x86_64-pc-windows-msvc\release\rshot.exe`；不会因用户级 Cargo target 配置误审其他目录中的旧文件。
 
 高精度 OCR 使用的模型和推理组件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+完整 ZIP 包含当前第三方许可证和声明材料。rshot 项目自身的开源许可证尚未声明，需要由项目所有者另行确定。
 
 ## 配置
 
@@ -90,13 +92,13 @@ diagnostics: true
 - 仅支持 Windows x86_64。
 - 最多同时保留 8 张置顶贴图；达到上限时保留当前编辑内容并提示先关闭一张旧贴图。
 - 默认 PP-OCRv6 组合覆盖简体中文、繁体中文、英文、日文及 46 种拉丁语系语言，不覆盖韩文；识别仍可能受字号、压缩、背景、字体和版面影响，不能保证逐字准确。`Windows.Media.Ocr` 回退路径的语言还取决于 Windows 用户语言顺序和已安装语言包。
-- OCR 期间主界面同步等待一次性 worker 完成，当前不能手动取消；一次识别总超时为 20 秒，超时后主进程会终止并等待回收 worker，再尝试 `Windows.Media.Ocr` 回退。worker 还加入带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Windows Job Object，主进程异常退出时由系统结束子进程。复杂大图仍可能短时占用较多内存并延迟界面响应。
+- OCR 期间主界面同步等待完整识别流程，当前不能手动取消；高精度 worker 的等待上限为 20 秒，超时后主进程会终止并回收 worker，再尝试 `Windows.Media.Ocr` 回退。系统 OCR 回退当前没有独立超时，因此完整操作可能超过 20 秒。worker 还加入带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Windows Job Object，主进程异常退出时由系统结束子进程。复杂大图仍可能短时占用较多内存并延迟界面响应。
 - 多显示器坐标逻辑已实现，但仍需要在更多缩放组合下验证。
 - 剪贴板文件格式使用独立临时 PNG，不会被下一次复制覆盖；程序每 12 小时清理一次超过 12 小时且未被当前剪贴板引用的文件。
 
 ## 内存
 
-- 待命时不保留截图像素，也不加载 OCR 模型或推理引擎，适合长期驻留；当前机器启动后静置 3 秒约为 11.2 MiB Working Set、1.9 MiB Private Bytes，实际数值会随系统和托盘状态变化。
+- 没有活动截图会话且没有贴图的纯待命状态不保留截图像素，也不加载 OCR 模型或推理引擎，适合长期驻留；当前机器在无贴图条件下启动后静置 3 秒约为 11.2 MiB Working Set、1.9 MiB Private Bytes，实际数值会随系统和托盘状态变化。已有贴图会继续持有各自的最终 RGBA 图像和绘图表面。
 - 截图显示直接从原始 RGBA 图像渲染，不再额外保存一份整屏显示副本。
 - 复制和置顶时会优先复用原图，减少高分辨率截图的瞬时复制。
 - 待命时只有一个常驻进程，主进程不初始化 PP-OCR 模型或推理引擎，也不直接链接 ONNX Runtime 或 DirectML。执行 OCR 时，同一个 `rshot.exe` 以 `--rshot-ocr-worker` 启动一次性子进程；仅 worker 按需校验并原子提取嵌入的 CPU 运行时 DLL 到以两份 DLL 组合 SHA-256 前缀命名的 `%LOCALAPPDATA%\RShot\ocr-runtime-win-x64-1.28.0-*` 目录；缺少 `LOCALAPPDATA` 时使用系统临时目录。worker 在识别完成、失败或达到 20 秒超时后退出；超时时主进程终止并等待回收，主进程异常退出时由带 kill-on-close 的 Windows Job Object 回收。高精度后端失败时，本次识别回退到系统 OCR，并区分“模型无文字”和“模型不可用”提示实际后端。
