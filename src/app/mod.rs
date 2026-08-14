@@ -4,6 +4,7 @@ mod editor;
 mod geometry;
 mod handler;
 mod ocr;
+mod ocr_worker;
 mod pinned;
 mod render;
 mod state;
@@ -14,6 +15,7 @@ use diagnostics::*;
 use editor::*;
 use geometry::*;
 use ocr::*;
+use ocr_worker::*;
 use pinned::*;
 use render::*;
 use state::*;
@@ -296,18 +298,57 @@ impl App {
 
         let result = recognize_image_text(img, self.sel);
         match result {
-            Ok(text) if text.is_empty() => {
-                show_message("未识别到文字。\n请缩小选区，并确保文字足够清晰。", false);
+            Ok(recognition) if recognition.text.is_empty() => {
+                let backend_note = match recognition.fallback_reason {
+                    Some(OcrFallbackReason::ModelReturnedNoText) => {
+                        "\n高精度模型未识别到文字，已改用 Windows 系统 OCR。"
+                    }
+                    Some(OcrFallbackReason::ModelUnavailable) => {
+                        "\n高精度模型本次不可用，已改用 Windows 系统 OCR。"
+                    }
+                    None => "",
+                };
+                show_message(
+                    &format!("未识别到文字。\n请缩小选区，并确保文字足够清晰。{backend_note}"),
+                    false,
+                );
                 if let Some(w) = &self.window {
                     w.set_visible(true);
                     w.request_redraw();
                 }
             }
-            Ok(text) if clipboard_owner.is_some_and(|owner| text_to_clipboard(&text, owner)) => {
-                self.close_overlay()
+            Ok(recognition)
+                if clipboard_owner
+                    .is_some_and(|owner| text_to_clipboard(&recognition.text, owner)) =>
+            {
+                let fallback_reason = recognition.fallback_reason;
+                self.close_overlay();
+                match fallback_reason {
+                    Some(OcrFallbackReason::ModelReturnedNoText) => show_message(
+                        "高精度模型未识别到文字，已改用 Windows 系统 OCR 并复制文字。",
+                        false,
+                    ),
+                    Some(OcrFallbackReason::ModelUnavailable) => show_message(
+                        "高精度模型本次不可用，已改用 Windows 系统 OCR 并复制文字。",
+                        false,
+                    ),
+                    None => {}
+                }
             }
-            Ok(_) => {
-                show_message("文字已识别，但写入剪贴板失败，请重试。", true);
+            Ok(recognition) => {
+                let backend_note = match recognition.fallback_reason {
+                    Some(OcrFallbackReason::ModelReturnedNoText) => {
+                        "\n高精度模型未识别到文字，本次结果来自 Windows 系统 OCR。"
+                    }
+                    Some(OcrFallbackReason::ModelUnavailable) => {
+                        "\n高精度模型本次不可用，本次结果来自 Windows 系统 OCR。"
+                    }
+                    None => "",
+                };
+                show_message(
+                    &format!("文字已识别，但写入剪贴板失败，请重试。{backend_note}"),
+                    true,
+                );
                 if let Some(w) = &self.window {
                     w.set_visible(true);
                     w.request_redraw();
@@ -778,17 +819,22 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        Annotation, App, CaptureFailureStage, Config, MAX_PINNED_WINDOWS, Mode, PALETTE,
+        Annotation, App, CaptureFailureStage, Config, MAX_PINNED_WINDOWS, Mode, OcrBackend,
+        OcrCharacterData, OcrFallbackReason, OcrLineData, OcrRegionData, OcrWordData, PALETTE,
         PublishedImageFormats, RectI, SessionFailure, SessionFailureStage, Shape,
         TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR,
         TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image, build_about_message,
-        build_dib, capture_failure_log_line, claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in,
-        color_u32, crop_image, dragged_window_position, draw_annotation_image, draw_line_image,
-        draw_rect_image, gdi_text_size, has_pin_capacity, image_clipboard_publish_succeeded,
+        build_dib, capture_failure_log_line, choose_ocr_backend, claim_temp_cleanup_slot,
+        cleanup_expired_temp_pngs_in, color_u32, crop_image, dragged_window_position,
+        draw_annotation_image, draw_line_image, draw_rect_image, embedded_character_count,
+        gdi_text_size, has_pin_capacity, image_clipboard_publish_succeeded, is_cjk_language_tag,
         is_managed_temp_png, normalized_rect, ocr_region, palette_hit, palette_popup_rect,
-        palette_swatch_rect, prepare_ocr_rgba, record_capture_failure_in, toolbar_hit,
-        toolbar_item, toolbar_item_rect, toolbar_item_slot, toolbar_origin, toolbar_size,
-        unicode_text_bytes, write_unique_temp_png_in,
+        palette_swatch_rect, prepare_ocr_rgba, prepare_ocr_rgba_for_recognition,
+        prepare_ocr_worker_rgba, rebuild_model_ocr_text, rebuild_ocr_text,
+        record_capture_failure_in, regroup_ocr_lines, restore_model_cross_region_spacing,
+        restore_model_region_spacing, toolbar_hit, toolbar_item, toolbar_item_rect,
+        toolbar_item_slot, toolbar_origin, toolbar_size, unicode_text_bytes,
+        worker_protocol_round_trip, write_unique_temp_png_in,
     };
     use std::collections::HashSet;
     use std::fs::{self, FileTimes, OpenOptions};
@@ -796,9 +842,53 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-    use xcap::image::RgbaImage;
+    use xcap::image::{Rgb, RgbImage, RgbaImage};
 
     static TEST_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn embedded_ppocrv6_dictionary_matches_the_recognition_model() {
+        assert_eq!(embedded_character_count(), 18_708);
+    }
+
+    #[test]
+    fn ocr_backend_reports_model_success_without_calling_fallback() {
+        let result = choose_ocr_backend(Ok(String::from("  text  ")), || {
+            panic!("Windows OCR should not run after model success")
+        })
+        .unwrap();
+        assert_eq!(result.text, "text");
+        assert_eq!(result.backend, OcrBackend::PpOcrV6);
+        assert_eq!(result.fallback_reason, None);
+    }
+
+    #[test]
+    fn ocr_backend_explicitly_reports_windows_fallback() {
+        let result = choose_ocr_backend(Err(String::from("model unavailable")), || {
+            Ok(String::from("fallback text"))
+        })
+        .unwrap();
+        assert_eq!(result.text, "fallback text");
+        assert_eq!(result.backend, OcrBackend::Windows);
+        assert_eq!(
+            result.fallback_reason,
+            Some(OcrFallbackReason::ModelUnavailable)
+        );
+
+        let empty_model =
+            choose_ocr_backend(Ok(String::new()), || Ok(String::from("fallback text"))).unwrap();
+        assert_eq!(
+            empty_model.fallback_reason,
+            Some(OcrFallbackReason::ModelReturnedNoText)
+        );
+
+        let error = choose_ocr_backend(Err(String::from("model unavailable")), || {
+            Err(String::from("language pack unavailable"))
+        })
+        .unwrap_err();
+        assert!(error.contains("model unavailable"));
+        assert!(error.contains("language pack unavailable"));
+    }
 
     #[test]
     fn about_message_shows_author_and_loaded_hotkeys() {
@@ -1038,6 +1128,526 @@ mod tests {
         let (pixels, width, height) = prepare_ocr_rgba(&img, None, 100).unwrap();
         assert_eq!((width, height), img.dimensions());
         assert!(matches!(pixels, std::borrow::Cow::Borrowed(_)));
+    }
+
+    fn ocr_word(text: &str, x: f32, width: f32, height: f32) -> OcrWordData {
+        OcrWordData {
+            text: text.to_owned(),
+            x,
+            y: 0.0,
+            width,
+            height,
+        }
+    }
+
+    fn ocr_word_at(text: &str, x: f32, y: f32, width: f32, height: f32) -> OcrWordData {
+        OcrWordData {
+            text: text.to_owned(),
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn small_ocr_input_is_upscaled_without_exceeding_the_system_limit() {
+        let img = RgbaImage::new(400, 200);
+        let (pixels, width, height) = prepare_ocr_rgba_for_recognition(&img, None, 10_000).unwrap();
+        assert_eq!((width, height), (800, 400));
+        assert!(matches!(pixels, std::borrow::Cow::Owned(_)));
+
+        let (pixels, width, height) = prepare_ocr_rgba_for_recognition(&img, None, 600).unwrap();
+        assert_eq!((width, height), img.dimensions());
+        assert!(matches!(pixels, std::borrow::Cow::Borrowed(_)));
+
+        let wide = RgbaImage::new(1100, 500);
+        let (pixels, width, height) =
+            prepare_ocr_rgba_for_recognition(&wide, None, 10_000).unwrap();
+        assert_eq!((width, height), wide.dimensions());
+        assert!(matches!(pixels, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn ocr_text_rebuild_removes_fake_chinese_spaces_and_preserves_lines() {
+        let lines = vec![
+            OcrLineData {
+                words: vec![
+                    ocr_word("·", 0.0, 7.0, 7.0),
+                    ocr_word("严", 24.0, 19.0, 19.0),
+                    ocr_word("格", 44.0, 19.0, 19.0),
+                    ocr_word("采", 64.0, 19.0, 19.0),
+                    ocr_word("用", 84.0, 19.0, 19.0),
+                    ocr_word("；", 105.0, 4.0, 16.0),
+                ],
+            },
+            OcrLineData {
+                words: vec![
+                    ocr_word("补", 24.0, 19.0, 19.0),
+                    ocr_word("齐", 44.0, 19.0, 19.0),
+                    ocr_word("HTDP", 70.0, 47.0, 19.0),
+                    ocr_word("数", 124.0, 19.0, 19.0),
+                    ocr_word("据", 144.0, 19.0, 19.0),
+                    ocr_word("形", 164.0, 19.0, 19.0),
+                    ocr_word("状", 184.0, 19.0, 19.0),
+                    ocr_word("、", 204.0, 6.0, 19.0),
+                    ocr_word("操", 224.0, 19.0, 19.0),
+                    ocr_word("作", 244.0, 19.0, 19.0),
+                ],
+            },
+        ];
+
+        assert_eq!(
+            rebuild_ocr_text(&lines),
+            "• 严格采用；\r\n补齐 HTDP 数据形状、操作"
+        );
+    }
+
+    #[test]
+    fn ocr_text_rebuild_keeps_real_latin_spaces_and_does_not_guess_characters() {
+        let lines = vec![
+            OcrLineData {
+                words: vec![
+                    ocr_word("hello", 0.0, 40.0, 20.0),
+                    ocr_word("world", 43.0, 42.0, 20.0),
+                ],
+            },
+            OcrLineData {
+                words: vec![
+                    ocr_word("第", 0.0, 19.0, 20.0),
+                    ocr_word("3", 20.0, 10.0, 20.0),
+                    ocr_word("章", 31.0, 19.0, 20.0),
+                    ocr_word("Context", 58.0, 70.0, 20.0),
+                    ocr_word("、", 129.0, 6.0, 20.0),
+                    ocr_word("Container", 149.0, 84.0, 20.0),
+                ],
+            },
+            OcrLineData {
+                words: vec![
+                    ocr_word("窗", 0.0, 19.0, 20.0),
+                    ocr_word("囗", 20.0, 19.0, 20.0),
+                ],
+            },
+        ];
+
+        assert_eq!(
+            rebuild_ocr_text(&lines),
+            "hello world\r\n第3章 Context、Container\r\n窗囗"
+        );
+    }
+
+    #[test]
+    fn ocr_text_rebuild_repairs_only_flat_dashes_inside_ascii_identifiers() {
+        let first_dash = ocr_word("一", 13.0, 6.0, 2.0);
+        let second_dash = ocr_word("·", 71.0, 6.0, 2.0);
+        let lines = vec![
+            OcrLineData {
+                words: vec![
+                    ocr_word("D", 0.0, 12.0, 14.0),
+                    first_dash,
+                    ocr_word("01", 20.0, 18.0, 14.0),
+                    ocr_word("～", 39.0, 18.0, 6.0),
+                    ocr_word("D", 58.0, 12.0, 14.0),
+                    second_dash,
+                    ocr_word("13", 78.0, 18.0, 14.0),
+                    ocr_word("决", 103.0, 19.0, 20.0),
+                    ocr_word("策", 123.0, 19.0, 20.0),
+                ],
+            },
+            OcrLineData {
+                words: vec![
+                    ocr_word("决", 0.0, 19.0, 20.0),
+                    ocr_word("策", 20.0, 19.0, 20.0),
+                    ocr_word("记", 40.0, 19.0, 20.0),
+                    ocr_word("录", 60.0, 19.0, 20.0),
+                ],
+            },
+            OcrLineData {
+                words: vec![
+                    ocr_word("第", 0.0, 19.0, 20.0),
+                    ocr_word("一", 20.0, 19.0, 20.0),
+                    ocr_word("章", 40.0, 19.0, 20.0),
+                ],
+            },
+            OcrLineData {
+                words: vec![
+                    ocr_word("API", 0.0, 24.0, 20.0),
+                    ocr_word("一", 36.0, 6.0, 2.0),
+                    ocr_word("01", 54.0, 18.0, 20.0),
+                ],
+            },
+            OcrLineData {
+                words: vec![
+                    ocr_word("UTF", 0.0, 30.0, 20.0),
+                    ocr_word("-", 31.0, 6.0, 20.0),
+                    ocr_word("8", 38.0, 10.0, 20.0),
+                    ocr_word("编", 49.0, 19.0, 20.0),
+                    ocr_word("码", 69.0, 19.0, 20.0),
+                ],
+            },
+        ];
+
+        assert_eq!(
+            rebuild_ocr_text(&lines),
+            "D-01～D-13 决策\r\n决策记录\r\n第一章\r\nAPI 一 01\r\nUTF-8编码"
+        );
+    }
+
+    #[test]
+    fn ocr_layout_rebuild_is_limited_to_cjk_recognizer_languages() {
+        assert!(is_cjk_language_tag("zh-Hans-CN"));
+        assert!(is_cjk_language_tag("ja-JP"));
+        assert!(is_cjk_language_tag("ko_KR"));
+        assert!(!is_cjk_language_tag("en-US"));
+        assert!(!is_cjk_language_tag("fr-FR"));
+    }
+
+    #[test]
+    fn windows_ocr_fragments_are_reordered_by_physical_coordinates() {
+        let lines = vec![
+            OcrLineData {
+                words: vec![ocr_word_at("• 示例图", 43.0, 149.0, 357.0, 22.0)],
+            },
+            OcrLineData {
+                words: vec![ocr_word_at("下一行", 43.0, 195.0, 70.0, 20.0)],
+            },
+            OcrLineData {
+                words: vec![ocr_word_at("Container、", 397.0, 148.0, 202.0, 25.0)],
+            },
+            OcrLineData {
+                words: vec![ocr_word_at("窗口、", 609.0, 148.0, 79.0, 26.0)],
+            },
+            OcrLineData {
+                words: vec![ocr_word_at("剪贴板均正确。", 677.0, 148.0, 151.0, 25.0)],
+            },
+        ];
+
+        let rebuilt = regroup_ocr_lines(&lines);
+        assert_eq!(rebuilt.len(), 2);
+        assert_eq!(
+            rebuilt[0]
+                .words
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["• 示例图", "Container、", "窗口、", "剪贴板均正确。"]
+        );
+        assert_eq!(rebuilt[1].words[0].text, "下一行");
+    }
+
+    #[test]
+    fn model_ocr_rebuild_merges_gray_code_spans_and_preserves_mixed_text() {
+        let region = |text: &str, x: f32, y: f32, width: f32, height: f32| OcrRegionData {
+            text: text.to_owned(),
+            x,
+            y,
+            width,
+            height,
+            space_before: false,
+        };
+        let regions = vec![
+            region(
+                "• 小图在 200 万像素预算内放大 2 倍，提高小字和标点准确率。",
+                43.0,
+                22.0,
+                547.0,
+                21.0,
+            ),
+            region(
+                "• 中日韩 OCR 按”行、词、坐标”重建，保留 7 行及项目符号。",
+                43.0,
+                64.0,
+                530.0,
+                21.0,
+            ),
+            region(
+                "• 保护英文空格、UTF-8编码和正文中的“一”，避免后处理误改。",
+                42.0,
+                103.0,
+                569.0,
+                28.0,
+            ),
+            region(
+                "● 示例图已端到端验证，D-01~D-13、",
+                43.0,
+                149.0,
+                357.0,
+                22.0,
+            ),
+            region("Context、Container、", 397.0, 148.0, 202.0, 25.0),
+            region("窗口、", 609.0, 148.0, 79.0, 26.0),
+            region("剪贴板均正确。", 677.0, 148.0, 151.0, 25.0),
+            region(
+                "• 49 项测试全部通过，Release 构建成功。",
+                44.0,
+                195.0,
+                363.0,
+                20.0,
+            ),
+        ];
+
+        assert_eq!(
+            rebuild_model_ocr_text(&regions),
+            concat!(
+                "• 小图在 200 万像素预算内放大 2 倍，提高小字和标点准确率。\r\n",
+                "• 中日韩 OCR 按“行、词、坐标”重建，保留 7 行及项目符号。\r\n",
+                "• 保护英文空格、UTF-8编码和正文中的“一”，避免后处理误改。\r\n",
+                "• 示例图已端到端验证，D-01~D-13、Context、Container、窗口、剪贴板均正确。\r\n",
+                "• 49 项测试全部通过，Release 构建成功。"
+            )
+        );
+    }
+
+    #[test]
+    fn model_ocr_input_and_worker_protocol_are_bounded_and_lossless() {
+        let image = RgbaImage::from_raw(2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let (rgba, width, height) = prepare_ocr_worker_rgba(&image, None).unwrap();
+        let decoded = worker_protocol_round_trip(&rgba, width, height).unwrap();
+        assert_eq!(decoded, image);
+
+        let large = RgbaImage::new(5000, 2000);
+        let (rgba, width, height) = prepare_ocr_worker_rgba(&large, None).unwrap();
+        assert!(width <= 4096);
+        assert!(width as u64 * height as u64 <= 8_000_000);
+        assert_eq!(rgba.len(), width as usize * height as usize * 4);
+    }
+
+    #[test]
+    fn model_ocr_spacing_keeps_ordinals_and_mixed_identifiers_intact() {
+        let regions = vec![OcrRegionData {
+            text: String::from("第3章使用UTF-8编码和4K屏，含49项"),
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 20.0,
+            space_before: false,
+        }];
+        assert_eq!(
+            rebuild_model_ocr_text(&regions),
+            "第3章使用UTF-8编码和4K屏，含49项"
+        );
+    }
+
+    fn model_spacing_fixture(
+        text: &str,
+        boundary_after: usize,
+        blank_columns: u32,
+        background: [u8; 3],
+    ) -> (RgbImage, Vec<OcrCharacterData>) {
+        let chars: Vec<char> = text.chars().collect();
+        let mut positions = Vec::with_capacity(chars.len());
+        let mut cursor = 4_u32;
+        for (index, ch) in chars.iter().copied().enumerate() {
+            positions.push((ch, cursor));
+            cursor += 6;
+            if index + 1 < chars.len() {
+                cursor += if index == boundary_after {
+                    blank_columns
+                } else {
+                    1
+                };
+            }
+        }
+        let mut image = RgbImage::from_pixel(cursor + 4, 28, Rgb(background));
+        let mut characters = Vec::with_capacity(chars.len());
+        for (ch, x) in positions {
+            for pixel_y in 5..22 {
+                for pixel_x in x..x + 6 {
+                    if pixel_x == x || pixel_x == x + 5 || pixel_y == 5 || pixel_y == 21 {
+                        image.put_pixel(pixel_x, pixel_y, Rgb([20, 20, 20]));
+                    }
+                }
+            }
+            characters.push(OcrCharacterData {
+                ch,
+                x: x.saturating_sub(1) as f32,
+                y: 3.0,
+                width: 8.0,
+                height: 21.0,
+            });
+        }
+        (image, characters)
+    }
+
+    #[test]
+    fn model_ocr_restores_only_pixel_verified_mixed_text_spaces() {
+        for (text, boundary, gap, expected) in [
+            ("2倍", 0, 6, "2 倍"),
+            ("图2", 0, 6, "图 2"),
+            ("OCR按", 2, 6, "OCR 按"),
+            ("49项", 1, 6, "49 项"),
+            ("苹果iPhone", 1, 1, "苹果iPhone"),
+            ("Windows窗口", 6, 1, "Windows窗口"),
+            ("第3章", 0, 1, "第3章"),
+            ("4K屏", 1, 1, "4K屏"),
+        ] {
+            let (image, characters) = model_spacing_fixture(text, boundary, gap, [255, 255, 255]);
+            assert_eq!(
+                restore_model_region_spacing(text, &characters, &image),
+                expected,
+                "case: {text}"
+            );
+        }
+
+        let (image, characters) = model_spacing_fixture("UTF-8编码", 4, 1, [238, 238, 238]);
+        assert_eq!(
+            restore_model_region_spacing("UTF-8编码", &characters, &image),
+            "UTF-8编码"
+        );
+        assert_eq!(
+            restore_model_region_spacing("框数不匹配", &characters[..2], &image),
+            "框数不匹配"
+        );
+    }
+
+    #[test]
+    fn model_ocr_ignores_wide_blank_inside_cjk_glyphs() {
+        let width = 46;
+        let mut image = RgbImage::from_pixel(width, 28, Rgb([255, 255, 255]));
+        // 模拟“川”一类内部存在宽竖向空带的字形；两字符真实边界只有 1px。
+        for x in [4..7, 13..16, 22..25] {
+            for pixel_x in x {
+                for pixel_y in 5..22 {
+                    image.put_pixel(pixel_x, pixel_y, Rgb([20, 20, 20]));
+                }
+            }
+        }
+        for pixel_x in 26..34 {
+            for pixel_y in 5..22 {
+                if pixel_x == 26 || pixel_x == 33 || pixel_y == 5 || pixel_y == 21 {
+                    image.put_pixel(pixel_x, pixel_y, Rgb([20, 20, 20]));
+                }
+            }
+        }
+        let characters = vec![
+            OcrCharacterData {
+                ch: '川',
+                x: 3.0,
+                y: 3.0,
+                width: 22.0,
+                height: 21.0,
+            },
+            OcrCharacterData {
+                ch: 'A',
+                x: 25.0,
+                y: 3.0,
+                width: 10.0,
+                height: 21.0,
+            },
+        ];
+        assert_eq!(
+            restore_model_region_spacing("川A", &characters, &image),
+            "川A"
+        );
+        let undercovered = vec![
+            OcrCharacterData {
+                width: 14.0,
+                ..characters[0].clone()
+            },
+            characters[1].clone(),
+        ];
+        assert_eq!(
+            restore_model_region_spacing("川A", &undercovered, &image),
+            "川A"
+        );
+
+        let mut image = RgbImage::from_pixel(width, 28, Rgb([255, 255, 255]));
+        for pixel_x in 4..12 {
+            for pixel_y in 5..22 {
+                if pixel_x == 4 || pixel_x == 11 || pixel_y == 5 || pixel_y == 21 {
+                    image.put_pixel(pixel_x, pixel_y, Rgb([20, 20, 20]));
+                }
+            }
+        }
+        for x in [13..16, 22..25, 31..34] {
+            for pixel_x in x {
+                for pixel_y in 5..22 {
+                    image.put_pixel(pixel_x, pixel_y, Rgb([20, 20, 20]));
+                }
+            }
+        }
+        let characters = vec![
+            OcrCharacterData {
+                ch: 'A',
+                x: 3.0,
+                y: 3.0,
+                width: 10.0,
+                height: 21.0,
+            },
+            OcrCharacterData {
+                ch: '川',
+                x: 12.0,
+                y: 3.0,
+                width: 23.0,
+                height: 21.0,
+            },
+        ];
+        assert_eq!(
+            restore_model_region_spacing("A川", &characters, &image),
+            "A川"
+        );
+        let undercovered = vec![
+            characters[0].clone(),
+            OcrCharacterData {
+                x: 20.0,
+                width: 15.0,
+                ..characters[1].clone()
+            },
+        ];
+        assert_eq!(
+            restore_model_region_spacing("A川", &undercovered, &image),
+            "A川"
+        );
+    }
+
+    #[test]
+    fn model_ocr_cross_region_spaces_also_require_pixel_evidence() {
+        let (image, characters) = model_spacing_fixture("OCR按", 2, 6, [255, 255, 255]);
+        let mut regions = vec![
+            OcrRegionData {
+                text: String::from("OCR"),
+                x: characters[0].x,
+                y: 3.0,
+                width: characters[2].x + characters[2].width - characters[0].x,
+                height: 21.0,
+                space_before: false,
+            },
+            OcrRegionData {
+                text: String::from("按"),
+                x: characters[3].x,
+                y: 3.0,
+                width: characters[3].width,
+                height: 21.0,
+                space_before: false,
+            },
+        ];
+        let character_groups = vec![characters[..3].to_vec(), characters[3..].to_vec()];
+        restore_model_cross_region_spacing(&mut regions, &character_groups, &image);
+        assert!(regions[1].space_before);
+        assert_eq!(rebuild_model_ocr_text(&regions), "OCR 按");
+    }
+
+    #[test]
+    fn model_ocr_does_not_merge_distant_same_row_columns() {
+        let regions = vec![
+            OcrRegionData {
+                text: String::from("左栏"),
+                x: 10.0,
+                y: 20.0,
+                width: 40.0,
+                height: 20.0,
+                space_before: false,
+            },
+            OcrRegionData {
+                text: String::from("右栏"),
+                x: 300.0,
+                y: 20.0,
+                width: 40.0,
+                height: 20.0,
+                space_before: false,
+            },
+        ];
+        assert_eq!(rebuild_model_ocr_text(&regions), "左栏\r\n右栏");
     }
 
     #[test]
@@ -1564,6 +2174,20 @@ mod tests {
 }
 
 pub(super) fn entry() {
+    if is_ocr_self_test_invocation() {
+        if let Err(error) = run_ocr_self_test() {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        return;
+    }
+    if is_ocr_worker_invocation() {
+        if let Err(error) = run_ocr_worker() {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     // release 版没控制台，启动出错会闷声退出；这里把错误弹窗告诉用户
     if let Err(error) = run() {
         show_message(&format!("rshot 启动失败：\n{error}"), true);
