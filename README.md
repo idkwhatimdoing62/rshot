@@ -4,6 +4,8 @@
 
 **[下载最新版本 rshot.exe](https://github.com/idkwhatimdoing62/rshot/releases/latest/download/rshot.exe)**
 
+当前稳定版为 **[v0.2.15](https://github.com/idkwhatimdoing62/rshot/releases/tag/v0.2.15)**。该版本已启用完全离线的 PP-OCRv6 高精度识别路径，并通过 60 项自动测试、便携 Release 构建、依赖审计和真实模型推理烟测。
+
 ## 功能
 
 - **冻屏框选**：按热键冻结当前屏幕，拖出矩形选区。
