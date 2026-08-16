@@ -77,8 +77,7 @@ impl ApplicationHandler for App {
             }
             if ev.id == self.quit_id {
                 event_loop.exit(); // 退出整个程序
-            } else if ev.id == self.shot_id && self.window.is_none() && !self.capture_attempt_active
-            {
+            } else if ev.id == self.shot_id && self.capture_operation.is_none() {
                 // 只限制活动截图会话；已有贴图不会阻止下一次截图。
                 self.open_overlay(event_loop);
             }
@@ -90,7 +89,11 @@ impl ApplicationHandler for App {
             }
         }
         // 文字输入光标闪烁：每 ~530ms 翻转一次可见性
-        if self.text_editing && self.mode == Mode::Editing {
+        if self
+            .capture_operation
+            .as_ref()
+            .is_some_and(|operation| operation.text_editing && operation.mode == Mode::Editing)
+        {
             let now = Instant::now();
             match self.last_blink {
                 Some(last) if now.duration_since(last) >= Duration::from_millis(530) => {
@@ -106,9 +109,9 @@ impl ApplicationHandler for App {
                 }
                 _ => {}
             }
-        } else {
-            self.last_blink = None;
-            self.cursor_visible = true;
+        } else if let Some(operation) = &mut self.capture_operation {
+            operation.last_blink = None;
+            operation.cursor_visible = true;
         }
         // ponytail: 120ms 轮询一次热键。想零延迟得用 EventLoopProxy 唤醒，暂不需要
         event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -116,17 +119,16 @@ impl ApplicationHandler for App {
         ));
     }
 
-    fn window_event(
-        &mut self,
-        _event_loop: &dyn ActiveEventLoop,
-        id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.pins.contains_key(&id) {
             self.handle_pinned_window_event(id, event);
             return;
         }
-        let Some(window) = self.window.as_ref() else {
+        let Some(window) = self
+            .capture_operation
+            .as_ref()
+            .and_then(|operation| operation.window.as_ref())
+        else {
             return;
         };
         if window.id() != id {
@@ -181,7 +183,7 @@ impl ApplicationHandler for App {
                         return;
                     }
                     if event.physical_key == PhysicalKey::Code(KeyCode::KeyP) {
-                        self.pin();
+                        self.pin(event_loop);
                         return;
                     }
                     if event.physical_key == PhysicalKey::Code(KeyCode::KeyZ)
@@ -322,7 +324,12 @@ impl ApplicationHandler for App {
                         .as_ref()
                         .map(|w| w.surface_size())
                         .and_then(|size| {
-                            toolbar_hit(self.cur, size.width as i32, size.height as i32, self.sel)
+                            toolbar_hit(
+                                self.cur,
+                                size.width as i32,
+                                size.height as i32,
+                                self.selection(),
+                            )
                         });
                     let hover_index = hover.map(toolbar_item_slot);
                     let hover_changed = hover_index != self.toolbar_hover;
@@ -330,7 +337,12 @@ impl ApplicationHandler for App {
                     let palette_hover = if self.palette_open {
                         self.window.as_ref().and_then(|w| {
                             let size = w.surface_size();
-                            palette_hit(self.cur, size.width as i32, size.height as i32, self.sel)
+                            palette_hit(
+                                self.cur,
+                                size.width as i32,
+                                size.height as i32,
+                                self.selection(),
+                            )
                         })
                     } else {
                         None
@@ -349,24 +361,24 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                let before = self.sel;
+                let before = self.selection();
                 match self.start {
                     // 按住中：移动超过 4 像素才算拖框，否则保持（留给单击截窗）
                     Some(anchor) => {
                         if (self.cur.0 - anchor.0).abs() > 4 || (self.cur.1 - anchor.1).abs() > 4 {
                             self.dragged = true;
-                            self.sel = Some((anchor, self.cur));
+                            self.set_selection(Some((anchor, self.cur)));
                         }
                     }
                     // 没按住：悬停锁定光标下的窗口。但已手动拖过框就别再冲掉它
                     None => {
                         if !self.manual {
-                            self.sel = self.window_under_cursor();
+                            self.set_selection(self.window_under_cursor());
                         }
                     }
                 }
                 // 选框变了才重画，省得原地不动也刷屏
-                if self.sel != before {
+                if self.selection() != before {
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -384,13 +396,18 @@ impl ApplicationHandler for App {
                                     self.cur,
                                     size.width as i32,
                                     size.height as i32,
-                                    self.sel,
+                                    self.selection(),
                                 )
                             });
                     let palette_swatch = if self.palette_open {
                         self.window.as_ref().and_then(|w| {
                             let size = w.surface_size();
-                            palette_hit(self.cur, size.width as i32, size.height as i32, self.sel)
+                            palette_hit(
+                                self.cur,
+                                size.width as i32,
+                                size.height as i32,
+                                self.selection(),
+                            )
                         })
                     } else {
                         None
@@ -412,7 +429,7 @@ impl ApplicationHandler for App {
                                     self.close_palette();
                                     return;
                                 }
-                                if point_in_selection(self.cur, self.sel) {
+                                if point_in_selection(self.cur, self.selection()) {
                                     if self.tool == Tool::Text {
                                         self.start_text(self.cur);
                                     } else {
@@ -436,7 +453,7 @@ impl ApplicationHandler for App {
                                     let pressed = self.toolbar_pressed.take();
                                     let slot = toolbar_item_slot(item);
                                     if pressed == Some(slot) {
-                                        self.apply_toolbar_item(item);
+                                        self.apply_toolbar_item(item, event_loop);
                                     }
                                     return;
                                 }
@@ -464,7 +481,7 @@ impl ApplicationHandler for App {
                     if self.mode == Mode::Editing {
                         match state {
                             ElementState::Pressed => {
-                                if point_in_selection(self.cur, self.sel) {
+                                if point_in_selection(self.cur, self.selection()) {
                                     self.drawing = true;
                                     self.start_shape(self.cur);
                                 }

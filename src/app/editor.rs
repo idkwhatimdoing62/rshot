@@ -63,19 +63,6 @@ pub(super) struct EditorState {
 }
 
 impl EditorState {
-    pub(super) fn reset_for_capture(&mut self) {
-        self.mode = Mode::Selecting;
-        self.annotations.clear();
-        self.tool = Tool::Pen;
-        self.color = PALETTE[0];
-        self.drawing = false;
-        self.toolbar_hover = None;
-        self.toolbar_pressed = None;
-        self.text_editing = false;
-        self.ime_preedit.clear();
-        self.close_palette();
-    }
-
     pub(super) fn reset_for_reselect(&mut self) {
         self.mode = Mode::Selecting;
         self.annotations.clear();

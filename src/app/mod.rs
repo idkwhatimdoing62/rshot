@@ -1,3 +1,4 @@
+mod capture_operation;
 mod clipboard;
 mod diagnostics;
 mod editor;
@@ -10,6 +11,7 @@ mod render;
 mod state;
 mod windows_adapter;
 
+use capture_operation::*;
 use clipboard::*;
 use diagnostics::*;
 use editor::*;
@@ -35,8 +37,8 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+use winit::window::{Window, WindowAttributes, WindowId};
 use xcap::Monitor;
 use xcap::image::RgbaImage;
 
@@ -80,51 +82,46 @@ struct App {
     quit_id: u32,
     about_message: String,
     diagnostics_enabled: bool,
-    capture_attempt_active: bool,
+    capture_operation: Option<CaptureOperation>,
 
-    // —— 以下是遮罩窗口的状态，只有正在框选时才有值 ——
-    window: Option<Rc<dyn Window>>,
-    surface: Option<Surface<Rc<dyn Window>, Rc<dyn Window>>>,
-    img: Option<RgbaImage>, // 原始截图（裁剪用，保留 RGBA）
-    cursor: (i32, i32),
-    start: Option<(i32, i32)>,             // 拖动中的锚点
-    cur: (i32, i32),                       // 鼠标当前点
-    sel: Option<((i32, i32), (i32, i32))>, // 已定的选框（两对角点）
-
-    // —— 自动锁定窗口用 ——
-    windows: Vec<RectI>, // 开遮罩前拍下的所有窗口矩形（屏幕坐标，Z 序，顶层在前）
-    origin: (i32, i32),  // 遮罩所在屏的左上角屏幕坐标，做窗口↔屏幕坐标换算
-    dragged: bool,       // 本次按下后是否已构成拖拽（区分单击 vs 拖框）
-    manual: bool,        // 已手动拖出选框、待右击确认。true 时停掉悬停锁定，别把框冲掉
-    editor: EditorState,
-    last_blink: Option<Instant>,
-    modifiers: ModifiersState,
     pins: HashMap<WindowId, PinnedWindow>,
     last_temp_cleanup: Option<Instant>,
 }
 
 impl Deref for App {
-    type Target = EditorState;
+    type Target = CaptureOperation;
 
     fn deref(&self) -> &Self::Target {
-        &self.editor
+        self.capture_operation
+            .as_ref()
+            .expect("active screenshot session has state")
     }
 }
 
 impl DerefMut for App {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.editor
+        self.capture_operation
+            .as_mut()
+            .expect("active screenshot session has state")
     }
 }
 
 impl App {
-    fn begin_capture_attempt(&mut self) {
-        self.close_overlay();
-        self.capture_attempt_active = true;
+    fn selection(&self) -> Option<((i32, i32), (i32, i32))> {
+        self.capture_operation
+            .as_ref()
+            .and_then(CaptureOperation::selection)
     }
 
-    fn finish_capture_attempt(&mut self) {
-        self.capture_attempt_active = false;
+    fn set_selection(&mut self, selection: Option<((i32, i32), (i32, i32))>) {
+        if let Some(operation) = &mut self.capture_operation {
+            operation.set_selection(selection);
+        }
+    }
+
+    fn begin_capture_attempt(&mut self) {
+        self.close_overlay();
+        self.capture_operation = Some(CaptureOperation::begin());
     }
 
     /// 截图热键触发：截鼠标那块屏 + 弹全屏遮罩，进入框选
@@ -137,7 +134,6 @@ impl App {
             self.handle_capture_failure(CaptureFailureStage::ReadCursor);
             return;
         };
-        self.cursor = cursor;
 
         // 2. 分别定位截图后端和遮罩窗口使用的显示器。
         let Ok(monitor) = Monitor::from_point(cursor.0, cursor.1) else {
@@ -165,7 +161,6 @@ impl App {
             self.handle_capture_failure(CaptureFailureStage::MatchOverlayMonitor);
             return;
         };
-        self.origin = origin;
 
         // 3. 截鼠标所在屏：隐藏旧贴图后获取并保留一份原始 RGBA。
         // 旧贴图在整个新会话期间保持隐藏，既不会进入截图，也不会盖住选择遮罩。
@@ -177,14 +172,10 @@ impl App {
                 return;
             }
         };
-        self.img = Some(img);
-        self.start = None; // 每次开都重置框选
-        self.sel = None;
-        self.editor.reset_for_capture();
 
         // 4. 建全屏无边框窗口钉到已经匹配的显示器。
         // 弹遮罩之前把所有可见窗口的矩形拍个快照（之后遮罩会盖住一切，就点不到底下窗口了）
-        self.windows = visible_window_rects();
+        let windows = visible_window_rects();
 
         let window: Rc<dyn Window> = match event_loop.create_window(
             WindowAttributes::default()
@@ -225,9 +216,16 @@ impl App {
         #[allow(deprecated)]
         window.set_ime_allowed(true); // 让遮罩窗口能接收输入法组合（拼音候选窗）
         window.request_redraw(); // 主动要首帧，否则黑底白窗
-        self.window = Some(window);
-        self.surface = Some(surface);
-        self.finish_capture_attempt();
+        let Some(operation) = self.capture_operation.take() else {
+            self.handle_capture_failure(CaptureFailureStage::CaptureImage);
+            return;
+        };
+        let mut operation = operation.capture_succeeded(img, window, surface);
+        operation.cursor = cursor;
+        operation.cur = cursor;
+        operation.origin = origin;
+        operation.windows = windows;
+        self.capture_operation = Some(operation);
     }
 
     /// 确认截图：至少一种图片格式写入成功才结束会话；全部失败则恢复编辑界面。
@@ -245,9 +243,12 @@ impl App {
             w.set_visible(false); // 先藏，编码耗时挪到看不见后
         }
 
-        let outcome = if self.sel.is_none() && self.annotations.is_empty() {
+        let outcome = if self.selection().is_none() && self.annotations.is_empty() {
             // 全屏且没有标注时直接使用原图，避免再克隆一份整屏 RGBA。
-            self.img.as_ref().map(|img| image_to_clipboard(img, owner))
+            self.capture_operation
+                .as_ref()
+                .map(CaptureOperation::frozen_image)
+                .map(|img| image_to_clipboard(img, owner))
         } else {
             self.output_image()
                 .map(|img| image_to_clipboard(&img, owner))
@@ -279,13 +280,21 @@ impl App {
     }
 
     fn output_image(&self) -> Option<RgbaImage> {
-        compose_output(self.img.as_ref()?, self.sel, &self.annotations)
+        compose_output(
+            self.capture_operation.as_ref()?.frozen_image(),
+            self.selection(),
+            &self.annotations,
+        )
     }
 
     /// 识别当前原始选区中的文字并写入文字剪贴板。标注层不会参与 OCR。
     fn copy_ocr_text(&mut self) {
         self.commit_text();
-        let Some(img) = self.img.as_ref() else {
+        let Some(img) = self
+            .capture_operation
+            .as_ref()
+            .map(CaptureOperation::frozen_image)
+        else {
             return;
         };
         let clipboard_owner = self
@@ -296,7 +305,7 @@ impl App {
             w.set_visible(false);
         }
 
-        let result = recognize_image_text(img, self.sel);
+        let result = recognize_image_text(img, self.selection());
         match result {
             Ok(recognition) if recognition.text.is_empty() => {
                 let backend_note = match recognition.fallback_reason {
@@ -364,7 +373,7 @@ impl App {
         }
     }
 
-    fn pin(&mut self) {
+    fn pin(&mut self, event_loop: &dyn ActiveEventLoop) {
         if !has_pin_capacity(self.pins.len()) {
             if let Some(window) = &self.window {
                 window.set_visible(false);
@@ -381,9 +390,9 @@ impl App {
             }
             return;
         }
-        let Some(window) = self.window.as_ref().cloned() else {
+        if self.window.is_none() {
             return;
-        };
+        }
         if self.surface.is_none() {
             self.handle_session_failure(SessionFailure::new(
                 SessionFailureStage::AccessSurface,
@@ -391,52 +400,58 @@ impl App {
             ));
             return;
         }
-        let out = if self.sel.is_none() && self.annotations.is_empty() {
-            // 没有裁剪/标注时直接转移所有权，不再复制整屏。
-            let Some(img) = self.img.take() else {
-                return;
-            };
-            img
+        let composed = if self.selection().is_none() && self.annotations.is_empty() {
+            None
         } else {
             let Some(img) = self.output_image() else {
                 return;
             };
-            img
+            Some(img)
+        };
+        let dimensions = composed.as_ref().map(RgbaImage::dimensions).or_else(|| {
+            self.capture_operation
+                .as_ref()
+                .map(CaptureOperation::frozen_image)
+                .map(RgbaImage::dimensions)
+        });
+        let Some((image_width, image_height)) = dimensions else {
+            return;
         };
         let pos = self
-            .sel
+            .selection()
             .map(normalized_rect)
             .map(|r| PhysicalPosition::new(self.origin.0 + r.0, self.origin.1 + r.1))
             .unwrap_or(PhysicalPosition::new(self.origin.0, self.origin.1));
         // 给右上角关闭按钮留出最小可点击区域，极小选区也不会丢失控制入口。
-        let size = PhysicalSize::new(out.width().max(56), out.height().max(44));
-        window.set_fullscreen(None);
-        window.set_decorations(false);
-        window.set_window_level(WindowLevel::AlwaysOnTop);
-        let _ = window.request_surface_size(size.into());
-        window.set_outer_position(pos.into());
-
-        let Some(surface) = self.surface.take() else {
-            self.handle_session_failure(SessionFailure::new(
-                SessionFailureStage::AccessSurface,
-                "转换贴图时绘图表面已经失效",
-            ));
-            return;
+        let size = PhysicalSize::new(image_width.max(56), image_height.max(44));
+        let prepared = match PreparedPinnedWindow::create(event_loop, pos, size) {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                show_message(
+                    &format!("创建置顶贴图失败，当前截图和标注已保留。\n\n{failure}"),
+                    true,
+                );
+                return;
+            }
         };
-        let Some(window) = self.window.take() else {
-            self.surface = Some(surface);
-            self.handle_session_failure(SessionFailure::new(
-                SessionFailureStage::CreateWindow,
-                "转换贴图时活动窗口已经失效",
-            ));
-            return;
+        let out = match composed {
+            Some(image) => image,
+            None => {
+                let Some(mut operation) = self.capture_operation.take() else {
+                    return;
+                };
+                // 新窗口已成功创建后再释放旧窗口；始终先释放绘图表面，再释放窗口。
+                operation.close_window_resources();
+                let Some(image) = operation.into_frozen_image() else {
+                    return;
+                };
+                image
+            }
         };
-        let id = window.id();
-        self.clear_capture_state();
-        if let Some(replaced) = self
-            .pins
-            .insert(id, PinnedWindow::new(surface, window, out))
-        {
+        let pin = prepared.finish(out);
+        let id = pin.window_id();
+        self.close_overlay();
+        if let Some(replaced) = self.pins.insert(id, pin) {
             replaced.close();
         }
         self.set_pins_visible(true);
@@ -445,7 +460,7 @@ impl App {
         }
     }
 
-    fn apply_toolbar_item(&mut self, item: ToolbarItem) {
+    fn apply_toolbar_item(&mut self, item: ToolbarItem, event_loop: &dyn ActiveEventLoop) {
         // 点工具栏先把未提交的文字输入落地，避免残留半截草稿
         self.commit_text();
         match item {
@@ -466,7 +481,7 @@ impl App {
                 ToolbarAction::Copy => self.confirm(),
                 ToolbarAction::Ocr => self.copy_ocr_text(),
                 ToolbarAction::Reselect => self.reselect(),
-                ToolbarAction::Pin => self.pin(),
+                ToolbarAction::Pin => self.pin(event_loop),
                 ToolbarAction::Undo => {
                     self.annotations.pop();
                     if let Some(w) = &self.window {
@@ -479,32 +494,32 @@ impl App {
     }
 
     fn close_palette(&mut self) {
-        self.editor.close_palette();
+        EditorState::close_palette(self.deref_mut());
     }
 
     /// 选中色板颜色：更新当前颜色；若正在输入文字，同步改掉草稿颜色（放框后再选色也能立即生效）。
     fn set_color(&mut self, index: usize) {
-        self.editor.set_color(index);
+        EditorState::set_color(self.deref_mut(), index);
     }
 
     /// 在编辑区按下左键：按当前工具起一条标注（拖动中实时更新，松手才定型）。
     fn start_shape(&mut self, p: (i32, i32)) {
-        self.editor.start_shape(p);
+        EditorState::start_shape(self.deref_mut(), p);
     }
 
     /// 拖动中：更新最后一条标注的末端。
     fn update_draft(&mut self, p: (i32, i32)) {
-        self.editor.update_draft(p);
+        EditorState::update_draft(self.deref_mut(), p);
     }
 
     /// 松手定型：单点画笔补成"点"，退化（起点=终点）的直线/矩形丢弃。
     fn commit_draft(&mut self) {
-        self.editor.commit_draft();
+        EditorState::commit_draft(self.deref_mut());
     }
 
     /// 在编辑区用文字工具按下：先把旧的文字输入提交掉，再在点下处新建一条空的文字草稿。
     fn start_text(&mut self, p: (i32, i32)) {
-        self.editor.start_text(p);
+        EditorState::start_text(self.deref_mut(), p);
         self.last_blink = None;
         self.update_ime_area();
         if let Some(w) = &self.window {
@@ -514,7 +529,7 @@ impl App {
 
     /// 提交文字输入：空内容则丢弃草稿。用于回车、点工具栏、切工具等时机。
     fn commit_text(&mut self) {
-        if !self.editor.commit_text() {
+        if !EditorState::commit_text(self.deref_mut()) {
             return;
         }
         if let Some(w) = &self.window {
@@ -524,7 +539,7 @@ impl App {
 
     /// 取消文字输入：丢掉草稿。
     fn cancel_text(&mut self) {
-        if !self.editor.cancel_text() {
+        if !EditorState::cancel_text(self.deref_mut()) {
             return;
         }
         if let Some(w) = &self.window {
@@ -558,31 +573,18 @@ impl App {
     }
 
     fn reselect(&mut self) {
-        // 保留当前冻结画面，只清掉选区和标注，避免重新截屏造成内容变化。
-        self.sel = None;
-        self.start = None;
-        self.dragged = false;
-        self.manual = false;
-        self.editor.reset_for_reselect();
+        if let Some(operation) = &mut self.capture_operation {
+            operation.reselect();
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }
     }
 
     fn finish_selection_gesture(&mut self, was_drag: bool) {
-        if was_drag && !selection_has_area(self.sel) {
-            // 横向或纵向拖动虽然越过了拖动阈值，但没有形成矩形面积。
-            // 留在选择态，并立即恢复光标下窗口的自动锁定。
-            self.mode = Mode::Selecting;
-            self.manual = false;
-            self.sel = self.window_under_cursor();
-            return;
-        }
-        if self.sel.is_some() {
-            self.manual = true;
-            self.mode = Mode::Editing;
-            self.toolbar_hover = None;
-            self.toolbar_pressed = None;
+        let hovered_window = self.window_under_cursor();
+        if let Some(operation) = &mut self.capture_operation {
+            operation.finish_selection_gesture(was_drag, hovered_window);
         }
     }
 
@@ -595,13 +597,17 @@ impl App {
             // 旧窗口的排队事件不能影响随后打开的新截图会话。
             return Ok(());
         }
-        let editor = &self.editor;
-        let surface = self.surface.as_mut().ok_or_else(|| {
-            SessionFailure::new(
-                SessionFailureStage::AccessSurface,
-                "活动窗口没有对应的绘图表面",
-            )
-        })?;
+        let selection = self.selection();
+        let (frozen_image, editor, surface) = self
+            .capture_operation
+            .as_mut()
+            .and_then(CaptureOperation::render_parts_mut)
+            .ok_or_else(|| {
+                SessionFailure::new(
+                    SessionFailureStage::AccessSurface,
+                    "活动窗口没有对应的绘图表面",
+                )
+            })?;
         let size = window.surface_size();
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
             // 最小化或窗口系统过渡期间可能短暂得到零尺寸，这不是会话故障。
@@ -614,10 +620,8 @@ impl App {
             .buffer_mut()
             .map_err(|error| SessionFailure::new(SessionFailureStage::AcquireBuffer, error))?;
 
-        if let Some(img) = &self.img {
-            blit_rgba_image(&mut buffer[..], w.get(), h.get(), img);
-        }
-        if let Some((a, b)) = self.sel {
+        blit_rgba_image(&mut buffer[..], w.get(), h.get(), frozen_image);
+        if let Some((a, b)) = selection {
             shade_outside(&mut buffer[..], w.get(), h.get(), a, b);
             // 再盖 3 像素红框
             draw_rect(
@@ -653,7 +657,7 @@ impl App {
                 &mut buffer[..],
                 w.get(),
                 h.get(),
-                self.sel,
+                selection,
                 editor.tool,
                 editor.color,
                 editor.toolbar_hover,
@@ -664,7 +668,7 @@ impl App {
                     &mut buffer[..],
                     w.get(),
                     h.get(),
-                    self.sel,
+                    selection,
                     editor.color,
                     editor.palette_hover,
                 );
@@ -678,9 +682,17 @@ impl App {
     }
 
     fn take_capture_failure_notice(&mut self, stage: CaptureFailureStage) -> Option<String> {
-        if !self.capture_attempt_active {
+        if !self
+            .capture_operation
+            .as_ref()
+            .is_some_and(CaptureOperation::is_preparing)
+        {
             return None;
         }
+        let Some(operation) = self.capture_operation.take() else {
+            return None;
+        };
+        let CaptureEnd::CaptureFailed(stage) = operation.capture_failed(stage);
         self.close_overlay();
         Some(format!("无法开始截图，请重试。\n错误码：{}", stage.code()))
     }
@@ -701,10 +713,7 @@ impl App {
 
     /// 清理失败会话并返回是否真的存在活动资源；用于屏蔽旧事件造成的重复报错。
     fn recover_failed_session(&mut self) -> bool {
-        let was_active = self.capture_attempt_active
-            || self.window.is_some()
-            || self.surface.is_some()
-            || self.img.is_some();
+        let was_active = self.capture_operation.is_some();
         self.close_overlay();
         was_active
     }
@@ -771,29 +780,14 @@ impl App {
     }
 
     fn clear_capture_state(&mut self) {
-        self.capture_attempt_active = false;
-        self.img = None;
-        self.cursor = (0, 0);
-        self.start = None;
-        self.cur = (0, 0);
-        self.sel = None;
-        self.windows = Vec::new();
-        self.origin = (0, 0);
-        self.dragged = false;
-        self.manual = false;
-        self.last_blink = None;
-        self.modifiers = ModifiersState::default();
-        self.editor.reset_for_reselect();
+        self.capture_operation = None;
     }
 
     /// 关掉活动截图窗口，回后台待命；已有贴图恢复显示且不被销毁。
     fn close_overlay(&mut self) {
-        // Surface 可能持有窗口句柄，先释放它，再释放窗口。
-        if let Some(window) = self.window.as_ref() {
-            window.set_visible(false);
+        if let Some(operation) = &mut self.capture_operation {
+            operation.close_window_resources();
         }
-        drop(self.surface.take());
-        drop(self.window.take());
         self.clear_capture_state();
         self.set_pins_visible(true);
     }
@@ -819,22 +813,22 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        Annotation, App, CaptureFailureStage, Config, MAX_PINNED_WINDOWS, Mode, OcrBackend,
-        OcrCharacterData, OcrFallbackReason, OcrLineData, OcrRegionData, OcrWordData, PALETTE,
-        PublishedImageFormats, RectI, SessionFailure, SessionFailureStage, Shape,
-        TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR,
-        TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image, build_about_message,
-        build_dib, capture_failure_log_line, choose_ocr_backend, claim_temp_cleanup_slot,
-        cleanup_expired_temp_pngs_in, color_u32, crop_image, dragged_window_position,
-        draw_annotation_image, draw_line_image, draw_rect_image, embedded_character_count,
-        gdi_text_size, has_pin_capacity, image_clipboard_publish_succeeded, is_cjk_language_tag,
-        is_managed_temp_png, normalized_rect, ocr_region, palette_hit, palette_popup_rect,
-        palette_swatch_rect, prepare_ocr_rgba, prepare_ocr_rgba_for_recognition,
-        prepare_ocr_worker_rgba, rebuild_model_ocr_text, rebuild_ocr_text,
-        record_capture_failure_in, regroup_ocr_lines, restore_model_cross_region_spacing,
-        restore_model_region_spacing, toolbar_hit, toolbar_item, toolbar_item_rect,
-        toolbar_item_slot, toolbar_origin, toolbar_size, unicode_text_bytes,
-        worker_protocol_round_trip, write_unique_temp_png_in,
+        Annotation, App, CaptureFailureStage, CaptureOperation, CapturePhase, Config,
+        MAX_PINNED_WINDOWS, Mode, OcrBackend, OcrCharacterData, OcrFallbackReason, OcrLineData,
+        OcrRegionData, OcrWordData, PALETTE, PublishedImageFormats, RectI, SessionFailure,
+        SessionFailureStage, Shape, TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT,
+        TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image,
+        build_about_message, build_dib, capture_failure_log_line, choose_ocr_backend,
+        claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in, color_u32, crop_image,
+        dragged_window_position, draw_annotation_image, draw_line_image, draw_rect_image,
+        embedded_character_count, gdi_text_size, has_pin_capacity,
+        image_clipboard_publish_succeeded, is_cjk_language_tag, is_managed_temp_png,
+        normalized_rect, ocr_region, palette_hit, palette_popup_rect, palette_swatch_rect,
+        prepare_ocr_rgba, prepare_ocr_rgba_for_recognition, prepare_ocr_worker_rgba,
+        rebuild_model_ocr_text, rebuild_ocr_text, record_capture_failure_in, regroup_ocr_lines,
+        restore_model_cross_region_spacing, restore_model_region_spacing, toolbar_hit,
+        toolbar_item, toolbar_item_rect, toolbar_item_slot, toolbar_origin, toolbar_size,
+        unicode_text_bytes, worker_protocol_round_trip, write_unique_temp_png_in,
     };
     use std::collections::HashSet;
     use std::fs::{self, FileTimes, OpenOptions};
@@ -845,6 +839,11 @@ mod tests {
     use xcap::image::{Rgb, RgbImage, RgbaImage};
 
     static TEST_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn install_test_capture(app: &mut App, image: RgbaImage) {
+        app.capture_operation =
+            Some(CaptureOperation::begin().capture_succeeded_without_window(image));
+    }
 
     #[test]
     fn embedded_ppocrv6_dictionary_matches_the_recognition_model() {
@@ -1721,9 +1720,9 @@ mod tests {
     #[test]
     fn reselect_keeps_frozen_image_but_clears_edit_state() {
         let mut app = App::default();
-        app.img = Some(RgbaImage::new(12, 9));
+        install_test_capture(&mut app, RgbaImage::new(12, 9));
         app.mode = Mode::Editing;
-        app.sel = Some(((1, 2), (8, 7)));
+        app.set_selection(Some(((1, 2), (8, 7))));
         app.annotations.push(Annotation {
             shape: Shape::Pen(vec![(2, 3), (4, 5)]),
             color: [255, 0, 0, 255],
@@ -1731,8 +1730,11 @@ mod tests {
         app.tool = Tool::Line;
         app.reselect();
         assert_eq!(app.mode, Mode::Selecting);
-        assert!(app.img.is_some());
-        assert!(app.sel.is_none());
+        assert_eq!(
+            app.capture_operation.as_ref().map(CaptureOperation::phase),
+            Some(CapturePhase::Selecting)
+        );
+        assert!(app.selection().is_none());
         assert!(app.annotations.is_empty());
         assert_eq!(app.tool, Tool::Line);
     }
@@ -1740,34 +1742,32 @@ mod tests {
     #[test]
     fn zero_area_drag_stays_selecting_and_restores_window_lock() {
         for selection in [Some(((10, 20), (80, 20))), Some(((20, 10), (20, 80)))] {
-            let mut app = App {
-                cur: (50, 50),
-                sel: selection,
-                manual: true,
-                windows: vec![RectI {
-                    left: 10,
-                    top: 10,
-                    right: 100,
-                    bottom: 100,
-                }],
-                ..Default::default()
-            };
+            let mut app = App::default();
+            install_test_capture(&mut app, RgbaImage::new(120, 120));
+            app.cur = (50, 50);
+            app.manual = true;
+            app.windows = vec![RectI {
+                left: 10,
+                top: 10,
+                right: 100,
+                bottom: 100,
+            }];
+            app.set_selection(selection);
 
             app.finish_selection_gesture(true);
 
             assert_eq!(app.mode, Mode::Selecting);
             assert!(!app.manual);
-            assert_eq!(app.sel, Some(((11, 11), (99, 99))));
+            assert_eq!(app.selection(), Some(((11, 11), (99, 99))));
         }
     }
 
     #[test]
     fn positive_area_drag_enters_editing() {
-        let mut app = App {
-            // 反向拖动形成的 1px 高选区仍是有效矩形。
-            sel: Some(((80, 21), (10, 20))),
-            ..Default::default()
-        };
+        let mut app = App::default();
+        install_test_capture(&mut app, RgbaImage::new(120, 120));
+        // 反向拖动形成的 1px 高选区仍是有效矩形。
+        app.set_selection(Some(((80, 21), (10, 20))));
 
         app.finish_selection_gesture(true);
 
@@ -1778,6 +1778,7 @@ mod tests {
     #[test]
     fn commit_draft_drops_degenerate_line() {
         let mut app = App::default();
+        install_test_capture(&mut app, RgbaImage::new(20, 20));
         app.annotations.push(Annotation {
             shape: Shape::Line((5, 5), (5, 5)),
             color: [255, 0, 0, 255],
@@ -1789,6 +1790,7 @@ mod tests {
     #[test]
     fn commit_draft_turns_single_pen_point_into_dot() {
         let mut app = App::default();
+        install_test_capture(&mut app, RgbaImage::new(20, 20));
         app.annotations.push(Annotation {
             shape: Shape::Pen(vec![(3, 3)]),
             color: [255, 0, 0, 255],
@@ -1803,6 +1805,7 @@ mod tests {
     #[test]
     fn start_shape_uses_current_tool_and_color() {
         let mut app = App::default();
+        install_test_capture(&mut app, RgbaImage::new(20, 20));
         app.tool = Tool::Rect;
         app.color = PALETTE[4];
         app.start_shape((7, 9));
@@ -1814,6 +1817,7 @@ mod tests {
     #[test]
     fn update_draft_moves_line_endpoint() {
         let mut app = App::default();
+        install_test_capture(&mut app, RgbaImage::new(20, 20));
         app.tool = Tool::Line;
         app.start_shape((1, 1));
         app.update_draft((6, 6));
@@ -1823,6 +1827,7 @@ mod tests {
     #[test]
     fn start_text_creates_draft_and_commits_empty_away() {
         let mut app = App::default();
+        install_test_capture(&mut app, RgbaImage::new(20, 20));
         app.mode = Mode::Editing;
         app.start_text((5, 5));
         assert!(app.text_editing);
@@ -1836,6 +1841,7 @@ mod tests {
     #[test]
     fn cancel_text_drops_draft() {
         let mut app = App::default();
+        install_test_capture(&mut app, RgbaImage::new(20, 20));
         app.mode = Mode::Editing;
         app.start_text((5, 5));
         app.cancel_text();
@@ -1866,6 +1872,7 @@ mod tests {
     #[test]
     fn commit_and_cancel_clear_ime_preedit() {
         let mut app = App::default();
+        install_test_capture(&mut app, RgbaImage::new(20, 20));
         app.mode = Mode::Editing;
         app.start_text((5, 5));
         app.ime_preedit = String::from("ni");
@@ -1880,6 +1887,7 @@ mod tests {
     #[test]
     fn set_color_updates_editing_text_draft() {
         let mut app = App::default();
+        install_test_capture(&mut app, RgbaImage::new(20, 20));
         app.mode = Mode::Editing;
         app.color = PALETTE[0];
         app.start_text((5, 5)); // 红色草稿
@@ -1942,10 +1950,18 @@ mod tests {
         let mut app = App::default();
 
         app.begin_capture_attempt();
-        assert!(app.capture_attempt_active);
-        app.finish_capture_attempt();
+        assert_eq!(
+            app.capture_operation.as_ref().map(CaptureOperation::phase),
+            Some(CapturePhase::Preparing)
+        );
+        let operation = app.capture_operation.take().unwrap();
+        app.capture_operation =
+            Some(operation.capture_succeeded_without_window(RgbaImage::new(2, 2)));
 
-        assert!(!app.capture_attempt_active);
+        assert_eq!(
+            app.capture_operation.as_ref().map(CaptureOperation::phase),
+            Some(CapturePhase::Selecting)
+        );
         assert!(
             app.take_capture_failure_notice(CaptureFailureStage::CaptureImage)
                 .is_none()
@@ -1964,11 +1980,11 @@ mod tests {
             CaptureFailureStage::ReadCursor,
             CaptureFailureStage::CaptureImage,
         ] {
-            app.img = Some(RgbaImage::new(8, 6));
+            install_test_capture(&mut app, RgbaImage::new(8, 6));
             app.cursor = (800, 600);
             app.cur = (10, 12);
             app.start = Some((1, 1));
-            app.sel = Some(((1, 1), (5, 4)));
+            app.set_selection(Some(((1, 1), (5, 4))));
             app.windows.push(RectI {
                 left: 1,
                 top: 2,
@@ -1987,31 +2003,18 @@ mod tests {
             });
 
             app.begin_capture_attempt();
-            assert!(app.capture_attempt_active);
-            assert!(app.img.is_none());
-            assert!(app.sel.is_none());
-            assert!(app.annotations.is_empty());
+            assert_eq!(
+                app.capture_operation.as_ref().map(CaptureOperation::phase),
+                Some(CapturePhase::Preparing)
+            );
+            assert!(app.selection().is_none());
 
             let notice = app.take_capture_failure_notice(stage).unwrap();
             assert!(notice.contains(stage.code()));
             assert!(!notice.contains("secret text"));
             assert!(!notice.contains("private annotation"));
-            assert!(!app.capture_attempt_active);
-            assert!(app.window.is_none());
-            assert!(app.surface.is_none());
-            assert!(app.img.is_none());
-            assert_eq!(app.cursor, (0, 0));
-            assert!(app.start.is_none());
-            assert_eq!(app.cur, (0, 0));
-            assert!(app.sel.is_none());
-            assert!(app.windows.is_empty());
-            assert_eq!(app.origin, (0, 0));
-            assert!(app.annotations.is_empty());
-            assert!(!app.dragged);
-            assert!(!app.manual);
-            assert!(!app.text_editing);
-            assert!(app.ime_preedit.is_empty());
-            assert_eq!(app.mode, Mode::Selecting);
+            assert!(app.capture_operation.is_none());
+            assert!(app.selection().is_none());
             assert_eq!(app.shot_id, 41);
             assert_eq!(app.quit_id, 42);
 
@@ -2025,13 +2028,13 @@ mod tests {
         let mut app = App {
             shot_id: 41,
             quit_id: 42,
-            img: Some(RgbaImage::new(8, 6)),
-            start: Some((1, 1)),
-            sel: Some(((1, 1), (5, 4))),
-            dragged: true,
-            manual: true,
             ..App::default()
         };
+        install_test_capture(&mut app, RgbaImage::new(8, 6));
+        app.start = Some((1, 1));
+        app.dragged = true;
+        app.manual = true;
+        app.set_selection(Some(((1, 1), (5, 4))));
         app.mode = Mode::Editing;
         app.drawing = true;
         app.palette_open = true;
@@ -2047,19 +2050,8 @@ mod tests {
             "device lost",
         ));
         assert!(notice.is_some());
-        assert!(app.window.is_none());
-        assert!(app.surface.is_none());
-        assert!(app.img.is_none());
-        assert!(app.start.is_none());
-        assert!(app.sel.is_none());
-        assert!(app.annotations.is_empty());
-        assert!(!app.dragged);
-        assert!(!app.manual);
-        assert!(!app.drawing);
-        assert!(!app.palette_open);
-        assert!(!app.text_editing);
-        assert!(app.ime_preedit.is_empty());
-        assert_eq!(app.mode, Mode::Selecting);
+        assert!(app.capture_operation.is_none());
+        assert!(app.selection().is_none());
         assert_eq!(app.shot_id, 41);
         assert_eq!(app.quit_id, 42);
 
@@ -2073,7 +2065,7 @@ mod tests {
         );
 
         // 下一次截图形成新会话后，新的失败仍然会产生一次通知。
-        app.img = Some(RgbaImage::new(2, 2));
+        install_test_capture(&mut app, RgbaImage::new(2, 2));
         assert!(
             app.take_session_failure_notice(SessionFailure::new(
                 SessionFailureStage::ResizeSurface,

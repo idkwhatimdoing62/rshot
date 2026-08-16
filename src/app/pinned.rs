@@ -1,11 +1,12 @@
 use super::render::{blit_rgba_image, draw_pin_controls, pin_close_rect};
 use super::state::{SessionFailure, SessionFailureStage};
 use super::windows_adapter::set_window_visible_without_activation;
-use softbuffer::Surface;
+use softbuffer::{Context, Surface};
 use std::num::NonZeroU32;
 use std::rc::Rc;
-use winit::dpi::PhysicalPosition;
-use winit::window::Window;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::event_loop::ActiveEventLoop;
+use winit::window::{Window, WindowAttributes, WindowLevel};
 use xcap::image::RgbaImage;
 
 pub(super) const MAX_PINNED_WINDOWS: usize = 8;
@@ -35,7 +36,46 @@ pub(super) struct PinnedWindow {
     drag: Option<((i32, i32), (i32, i32))>,
 }
 
+pub(super) struct PreparedPinnedWindow {
+    surface: Surface<Rc<dyn Window>, Rc<dyn Window>>,
+    window: Rc<dyn Window>,
+}
+
+impl PreparedPinnedWindow {
+    pub(super) fn create(
+        event_loop: &dyn ActiveEventLoop,
+        position: PhysicalPosition<i32>,
+        size: PhysicalSize<u32>,
+    ) -> Result<Self, SessionFailure> {
+        let window: Rc<dyn Window> = Rc::from(
+            event_loop
+                .create_window(
+                    WindowAttributes::default()
+                        .with_visible(false)
+                        .with_decorations(false)
+                        .with_window_level(WindowLevel::AlwaysOnTop)
+                        .with_surface_size(size),
+                )
+                .map_err(|error| SessionFailure::new(SessionFailureStage::CreateWindow, error))?,
+        );
+        window.set_outer_position(position.into());
+        let context = Context::new(window.clone())
+            .map_err(|error| SessionFailure::new(SessionFailureStage::CreateContext, error))?;
+        let surface = Surface::new(&context, window.clone())
+            .map_err(|error| SessionFailure::new(SessionFailureStage::CreateSurface, error))?;
+        Ok(Self { surface, window })
+    }
+
+    pub(super) fn finish(self, image: RgbaImage) -> PinnedWindow {
+        PinnedWindow::new(self.surface, self.window, image)
+    }
+}
+
 impl PinnedWindow {
+    pub(super) fn window_id(&self) -> winit::window::WindowId {
+        self.window.id()
+    }
+
     pub(super) fn new(
         surface: Surface<Rc<dyn Window>, Rc<dyn Window>>,
         window: Rc<dyn Window>,
