@@ -1,5 +1,4 @@
 use super::geometry::normalized_rect;
-use super::state::Mode;
 
 /// 当前选中的标注工具（编辑模式下左键拖拽用哪个图元）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,9 +44,7 @@ pub(super) const PALETTE: [[u8; 4]; 8] = [
 ];
 
 /// 与窗口、Surface 和系统 API 无关的编辑会话状态。
-#[derive(Default)]
 pub(super) struct EditorState {
-    pub(super) mode: Mode,
     pub(super) annotations: Vec<Annotation>,
     pub(super) tool: Tool,
     pub(super) color: [u8; 4],
@@ -62,18 +59,26 @@ pub(super) struct EditorState {
     pub(super) cursor_visible: bool,
 }
 
-impl EditorState {
-    pub(super) fn reset_for_reselect(&mut self) {
-        self.mode = Mode::Selecting;
-        self.annotations.clear();
-        self.drawing = false;
-        self.toolbar_hover = None;
-        self.toolbar_pressed = None;
-        self.text_editing = false;
-        self.ime_preedit.clear();
-        self.close_palette();
+impl Default for EditorState {
+    fn default() -> Self {
+        Self {
+            annotations: Vec::new(),
+            tool: Tool::Pen,
+            color: PALETTE[0],
+            drawing: false,
+            toolbar_hover: None,
+            toolbar_pressed: None,
+            palette_open: false,
+            palette_hover: None,
+            palette_pressed: None,
+            text_editing: false,
+            ime_preedit: String::new(),
+            cursor_visible: true,
+        }
     }
+}
 
+impl EditorState {
     pub(super) fn close_palette(&mut self) {
         self.palette_open = false;
         self.palette_hover = None;

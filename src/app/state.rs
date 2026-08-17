@@ -1,12 +1,5 @@
 use std::fmt;
 
-#[derive(Default, Debug, PartialEq)]
-pub(super) enum Mode {
-    #[default]
-    Selecting,
-    Editing,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CaptureFailureStage {
     ReadCursor,
