@@ -341,7 +341,12 @@ impl CaptureOperation {
         let (width, height) = snapshot
             .selection
             .map(normalized_rect)
-            .map(|rect| (rect.2.max(1) as u32, rect.3.max(1) as u32))
+            .map(|rect| {
+                (
+                    (rect.2 - rect.0).max(1) as u32,
+                    (rect.3 - rect.1).max(1) as u32,
+                )
+            })
             .unwrap_or_else(|| session.frozen_image.dimensions());
         let position = snapshot
             .selection
@@ -576,6 +581,19 @@ mod tests {
             view.frozen_image.as_ptr(),
             operation.frozen_image().as_ptr()
         );
+    }
+
+    #[test]
+    fn pin_plan_size_matches_the_selected_output_dimensions() {
+        let mut operation = CaptureOperation::begin().capture_succeeded_without_window(
+            RgbaImage::from_raw(1200, 800, vec![0; 1200 * 800 * 4]).expect("valid frozen image"),
+        );
+        operation.set_selection(Some(((700, 200), (1100, 600))));
+        operation.enter_editing();
+
+        let plan = operation.prepare_pin().expect("pin plan");
+
+        assert_eq!(plan.size, PhysicalSize::new(400, 400));
     }
 
     #[test]

@@ -406,27 +406,9 @@ pub(super) fn glyph(ch: char) -> [u8; 7] {
     }
 }
 
-pub(super) fn pin_close_rect(w: i32, _h: i32) -> (i32, i32, i32, i32) {
-    ((w - 38).max(8), 8, (w - 8).max(30), 36)
-}
-
-pub(super) fn draw_pin_controls(buf: &mut [u32], w: u32, h: u32) {
-    let close = pin_close_rect(w as i32, h as i32);
+pub(super) fn draw_pin_badge(buf: &mut [u32], w: u32, h: u32) {
     draw_fill_rect(buf, w, h, (8, 8, 50, 36), 0x003B78C8);
     draw_text(buf, w, h, 14, 18, "PIN", 2, 0x00FFFFFF);
-    draw_fill_rect(buf, w, h, close, 0x00A83D48);
-    draw_rect(
-        buf,
-        w,
-        h,
-        close.0,
-        close.1,
-        close.2 - 1,
-        close.3 - 1,
-        0x00FFFFFF,
-        1,
-    );
-    draw_text(buf, w, h, close.0 + 9, close.1 + 10, "X", 2, 0x00FFFFFF);
 }
 
 pub(super) fn draw_select_badge(buf: &mut [u32], w: u32, h: u32) {

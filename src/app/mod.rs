@@ -27,7 +27,6 @@ use windows_adapter::*;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use serde::{Deserialize, Serialize};
 use softbuffer::{Context, Surface};
-use std::collections::HashMap;
 use std::error::Error;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
@@ -81,7 +80,7 @@ struct App {
     diagnostics_enabled: bool,
     capture_operation: Option<CaptureOperation>,
 
-    pins: HashMap<WindowId, PinnedWindow>,
+    pins: PinCollection,
     last_temp_cleanup: Option<Instant>,
 }
 
@@ -138,7 +137,7 @@ impl App {
 
         // 3. 截鼠标所在屏：隐藏旧贴图后获取并保留一份原始 RGBA。
         // 旧贴图在整个新会话期间保持隐藏，既不会进入截图，也不会盖住选择遮罩。
-        self.set_pins_visible(false);
+        self.pins.hide_for_capture();
         let img = match monitor.capture_image() {
             Ok(img) => img,
             Err(_) => {
@@ -322,30 +321,26 @@ impl App {
         }
     }
     fn pin(&mut self, event_loop: &dyn ActiveEventLoop) {
-        if !has_pin_capacity(self.pins.len()) {
-            if let Some(operation) = &self.capture_operation {
-                operation.set_window_visible(false);
-            }
-            show_message(
-                &format!(
-                    "最多同时保留 {MAX_PINNED_WINDOWS} 张置顶贴图。\n请取消当前截图，关闭一张旧贴图后再试。"
-                ),
-                false,
-            );
-            if let Some(operation) = &self.capture_operation {
-                operation.set_window_visible(true);
-                operation.request_redraw();
-            }
-            return;
-        }
         let Some(operation) = self.capture_operation.as_mut() else {
             return;
         };
         let Ok(plan) = operation.prepare_pin() else {
             return;
         };
-        let prepared = match PreparedPinnedWindow::create(event_loop, plan.position, plan.size) {
+        let prepared = match self.pins.prepare(event_loop, plan.position, plan.size) {
             Ok(prepared) => prepared,
+            Err(failure) if failure.stage() == PinFailureStage::AtCapacity => {
+                operation.set_window_visible(false);
+                show_message(
+                    &format!(
+                        "最多同时保留 {MAX_PINNED_WINDOWS} 张置顶贴图。\n请取消当前截图，关闭一张旧贴图后再试。"
+                    ),
+                    false,
+                );
+                operation.set_window_visible(true);
+                operation.request_redraw();
+                return;
+            }
             Err(failure) => {
                 show_message(
                     &format!("创建置顶贴图失败，当前截图和标注已保留。\n\n{failure}"),
@@ -364,15 +359,7 @@ impl App {
                 return;
             }
         };
-        let pin = prepared.finish(out);
-        let id = pin.window_id();
-        self.set_pins_visible(true);
-        if let Some(replaced) = self.pins.insert(id, pin) {
-            replaced.close();
-        }
-        if let Some(pin) = self.pins.get(&id) {
-            pin.request_redraw();
-        }
+        prepared.commit(out);
     }
 }
 impl App {
@@ -428,36 +415,6 @@ impl App {
         }
     }
 
-    fn handle_pin_failure(&mut self, id: WindowId, failure: SessionFailure) {
-        if self.close_pin(id) {
-            show_message(
-                &format!("一张置顶贴图发生错误，已单独关闭。\n\n{failure}"),
-                true,
-            );
-        }
-    }
-
-    fn close_pin(&mut self, id: WindowId) -> bool {
-        let Some(pin) = self.pins.remove(&id) else {
-            return false;
-        };
-        pin.close();
-        true
-    }
-
-    fn set_pins_visible(&mut self, visible: bool) {
-        if self.pins.is_empty() {
-            return;
-        }
-        for pin in self.pins.values_mut() {
-            if !visible {
-                pin.end_drag();
-            }
-            pin.set_visible(visible);
-        }
-        flush_window_compositor();
-    }
-
     fn cleanup_temp_files_if_due(&mut self, now: Instant) {
         if !claim_temp_cleanup_slot(&mut self.last_temp_cleanup, now) {
             return;
@@ -479,22 +436,21 @@ impl App {
         if let Some(operation) = self.capture_operation.take() {
             operation.close();
         }
-        self.set_pins_visible(true);
+        self.pins.restore_after_capture();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Annotation, App, CaptureFailureStage, CaptureOperation, CapturePhase, Config,
-        MAX_PINNED_WINDOWS, OcrBackend, OcrCharacterData, OcrFallbackReason, OcrLineData,
-        OcrRegionData, OcrWordData, PALETTE, PublishedImageFormats, SessionFailure,
-        SessionFailureStage, Shape, TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT,
-        TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image,
-        build_about_message, build_dib, capture_failure_log_line, choose_ocr_backend,
-        claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in, color_u32, crop_image,
-        dragged_window_position, draw_annotation_image, draw_line_image, draw_rect_image,
-        embedded_character_count, gdi_text_size, has_pin_capacity,
+        Annotation, App, CaptureFailureStage, CaptureOperation, CapturePhase, Config, OcrBackend,
+        OcrCharacterData, OcrFallbackReason, OcrLineData, OcrRegionData, OcrWordData, PALETTE,
+        PublishedImageFormats, SessionFailure, SessionFailureStage, Shape,
+        TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR,
+        TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image, build_about_message,
+        build_dib, capture_failure_log_line, choose_ocr_backend, claim_temp_cleanup_slot,
+        cleanup_expired_temp_pngs_in, color_u32, crop_image, draw_annotation_image,
+        draw_line_image, draw_rect_image, embedded_character_count, gdi_text_size,
         image_clipboard_publish_succeeded, is_cjk_language_tag, is_managed_temp_png,
         normalized_rect, ocr_region, palette_hit, palette_popup_rect, palette_swatch_rect,
         prepare_ocr_rgba, prepare_ocr_rgba_for_recognition, prepare_ocr_worker_rgba,
@@ -584,22 +540,6 @@ mod tests {
         assert_eq!(config.hotkey, "Alt+A");
         assert_eq!(config.quit, "Alt+D");
         assert!(config.diagnostics);
-    }
-
-    #[test]
-    fn pin_capacity_accepts_eight_but_rejects_the_ninth() {
-        assert!(has_pin_capacity(0));
-        assert!(has_pin_capacity(MAX_PINNED_WINDOWS - 1));
-        assert!(!has_pin_capacity(MAX_PINNED_WINDOWS));
-        assert!(!has_pin_capacity(MAX_PINNED_WINDOWS + 1));
-    }
-
-    #[test]
-    fn pinned_window_drag_preserves_the_initial_pointer_offset() {
-        assert_eq!(
-            dragged_window_position((100, 80), (400, 300), (125, 110)),
-            (425, 330)
-        );
     }
 
     #[test]

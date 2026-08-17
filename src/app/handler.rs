@@ -1,68 +1,5 @@
 use super::*;
 
-impl App {
-    fn handle_pinned_window_event(&mut self, id: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => {
-                self.close_pin(id);
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && matches!(event.logical_key, Key::Named(NamedKey::Escape)) =>
-            {
-                self.close_pin(id);
-            }
-            WindowEvent::PointerMoved { position, .. } => {
-                if let Some(pin) = self.pins.get_mut(&id) {
-                    pin.set_cursor((position.x as i32, position.y as i32));
-                    if let Some(cursor) = cursor_position() {
-                        pin.drag_to(cursor);
-                    }
-                }
-            }
-            WindowEvent::PointerButton { state, button, .. } => {
-                let mouse_button = button.mouse_button();
-                if mouse_button == Some(MouseButton::Right) && state == ElementState::Released {
-                    self.close_pin(id);
-                    return;
-                }
-                if mouse_button != Some(MouseButton::Left) {
-                    return;
-                }
-                match state {
-                    ElementState::Pressed => {
-                        let close_hit = self
-                            .pins
-                            .get(&id)
-                            .is_some_and(PinnedWindow::close_button_hit);
-                        if close_hit {
-                            self.close_pin(id);
-                            return;
-                        }
-                        if let (Some(pin), Some(cursor)) =
-                            (self.pins.get_mut(&id), cursor_position())
-                        {
-                            pin.begin_drag(cursor);
-                        }
-                    }
-                    ElementState::Released => {
-                        if let Some(pin) = self.pins.get_mut(&id) {
-                            pin.end_drag();
-                        }
-                    }
-                }
-            }
-            WindowEvent::RedrawRequested => {
-                let failure = self.pins.get_mut(&id).and_then(|pin| pin.redraw().err());
-                if let Some(failure) = failure {
-                    self.handle_pin_failure(id, failure);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 impl ApplicationHandler for App {
     // 本程序不在启动时建窗口，遮罩是热键触发后临时建的，这里留空
     fn can_create_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {}
@@ -103,10 +40,17 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        if self.pins.contains_key(&id) {
-            self.handle_pinned_window_event(id, event);
-            return;
-        }
+        let event = match self.pins.handle_window_event(id, event) {
+            PinEventOutcome::Handled => return,
+            PinEventOutcome::Failed(failure) => {
+                show_message(
+                    &format!("一张置顶贴图发生错误，已单独关闭。\n\n{failure}"),
+                    true,
+                );
+                return;
+            }
+            PinEventOutcome::NotOwned(event) => event,
+        };
         let Some(operation) = &mut self.capture_operation else {
             return;
         };
