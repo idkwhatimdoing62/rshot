@@ -2,6 +2,8 @@ mod engine;
 mod worker;
 
 use std::fmt;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use xcap::image::RgbaImage;
 
 pub(super) use engine::{OcrBackend, OcrFallbackReason, OcrRecognition};
@@ -166,6 +168,10 @@ pub(super) fn recognize(request: OcrRequest<'_>) -> Result<OcrRecognition, OcrFa
 }
 
 pub(super) fn try_run_process_role() -> Result<bool, String> {
+    if let Some(result) = try_run_corpus_invocation() {
+        result?;
+        return Ok(true);
+    }
     if worker::is_ocr_self_test_invocation() {
         worker::run_ocr_self_test()?;
         return Ok(true);
@@ -175,6 +181,76 @@ pub(super) fn try_run_process_role() -> Result<bool, String> {
         return Ok(true);
     }
     Ok(false)
+}
+
+fn try_run_corpus_invocation() -> Option<Result<PathBuf, String>> {
+    const ARGUMENT: &str = "--rshot-ocr-corpus-self-test";
+    let mut arguments = std::env::args_os();
+    while let Some(argument) = arguments.next() {
+        if argument == ARGUMENT {
+            let Some(manifest) = arguments.next() else {
+                return Some(Err(format!("{ARGUMENT} requires a manifest path")));
+            };
+            let Some(report) = arguments.next() else {
+                return Some(Err(format!("{ARGUMENT} requires a report path")));
+            };
+            return Some(run_corpus(Path::new(&manifest), Path::new(&report)));
+        }
+    }
+    None
+}
+
+fn run_corpus(manifest: &Path, report: &Path) -> Result<PathBuf, String> {
+    let source = fs::read_to_string(manifest)
+        .map_err(|error| format!("could not read OCR corpus manifest: {error}"))?;
+    let directory = manifest
+        .parent()
+        .ok_or_else(|| String::from("OCR corpus manifest has no parent directory"))?;
+    let mut passed = 0_u32;
+    for (index, line) in source.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (filename, expected) = line.split_once('\t').ok_or_else(|| {
+            format!(
+                "OCR corpus manifest line {} is not tab-separated",
+                index + 1
+            )
+        })?;
+        let relative = Path::new(filename);
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(format!("OCR corpus filename is not local: {filename}"));
+        }
+        let image = xcap::image::open(directory.join(relative))
+            .map_err(|error| format!("could not load OCR corpus image {filename}: {error}"))?
+            .to_rgba8();
+        let actual = worker::recognize_with_worker(&image, None)?;
+        let normalized = actual.trim().replace("\r\n", "\n");
+        if normalized != expected {
+            return Err(format!(
+                "OCR corpus mismatch for {filename}: expected {expected:?}, got {normalized:?}"
+            ));
+        }
+        passed += 1;
+    }
+    if passed == 0 {
+        return Err(String::from("OCR corpus manifest contains no samples"));
+    }
+    if let Some(parent) = report
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(
+        report,
+        format!("{{\n  \"schema\": \"rshot_ocr_corpus_v1\",\n  \"passed\": {passed}\n}}\n"),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(report.to_owned())
 }
 
 pub(super) fn run_artifact_self_test() -> Result<(), String> {

@@ -35,6 +35,27 @@ function Invoke-Smoke([string]$Argument, [string]$Name) {
 Invoke-Smoke '--rshot-ocr-self-test' 'OCR artifact smoke test'
 Invoke-Smoke '--rshot-clipboard-self-test' 'Clipboard consumer smoke test'
 
+$ocrCorpusReport = Join-Path ([System.IO.Path]::GetTempPath()) "rshot-ocr-corpus-$PID.json"
+try {
+    $manifest = Join-Path $projectRoot 'fixtures\ocr\manifest.tsv'
+    $process = Start-Process -FilePath $resolvedExecutable -ArgumentList @('--rshot-ocr-corpus-self-test', $manifest, $ocrCorpusReport) -PassThru -WindowStyle Hidden
+    if (-not $process.WaitForExit(60000)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        $process.WaitForExit()
+        throw 'OCR corpus smoke test exceeded 60 seconds.'
+    }
+    if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $ocrCorpusReport)) {
+        throw "OCR corpus smoke test failed with exit code $($process.ExitCode)."
+    }
+    $ocrCorpus = Get-Content -LiteralPath $ocrCorpusReport -Raw | ConvertFrom-Json
+    if ($ocrCorpus.schema -ne 'rshot_ocr_corpus_v1' -or $ocrCorpus.passed -ne 3) {
+        throw 'OCR corpus smoke report is incomplete.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath $ocrCorpusReport -Force -ErrorAction SilentlyContinue
+}
+
 $sessionReport = Join-Path ([System.IO.Path]::GetTempPath()) "rshot-session-smoke-$PID.json"
 try {
     $process = Start-Process -FilePath $resolvedExecutable -ArgumentList @('--rshot-session-self-test', $sessionReport) -PassThru -WindowStyle Hidden

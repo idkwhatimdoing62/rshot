@@ -23,6 +23,7 @@
 | A-03 | Upgrade configuration | Existing YAML loads and new defaults apply | | |
 | A-04 | Consecutive session test | Two independent screenshot sessions start and close without stale state | | |
 | A-05 | Release session driver | Release executable reports first capture, consecutive capture, pin coexistence and OCR-with-pin scenarios | | |
+| A-06 | Versioned OCR corpus | Release OCR worker exactly recognizes the English, Chinese and mixed-text fixtures | | |
 
 ## Capture, display and interaction
 
@@ -73,6 +74,8 @@ Before interactive verification, run:
 Attach the generated JSON to the release result or its blocking GitHub Issue. It records only OS and display topology metadata; it does not capture pixels, window titles, paths, clipboard contents, or OCR text. A scenario may be marked PASS only when the recorded environment actually represents that scenario. For example, a single-display snapshot cannot close C-04 or C-05.
 
 The release smoke suite also invokes the hidden `--rshot-session-self-test <path>` process role. Its JSON result exercises production session orchestration with headless window adapters plus the real packaged OCR worker. It detects stale first/consecutive session state, capture-time pin restoration, and accidental pin hiding during OCR. It does not prove visual alignment, native pointer delivery, IME composition, or external application behavior.
+
+The versioned OCR corpus lives in `fixtures/ocr`. `manifest.tsv` is the independent source of expected normalized text. `scripts/generate-ocr-fixtures.ps1` uses Unicode code points rather than source-file Chinese literals so Windows PowerShell 5 produces the same content under different system locales. Release smoke invokes `--rshot-ocr-corpus-self-test <manifest> <report>` and requires all samples to match exactly.
 
 ## Release decision
 

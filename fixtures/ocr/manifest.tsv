@@ -1,0 +1,4 @@
+# filename<TAB>expected normalized text
+english.png	RSHOT 2026
+chinese.png	截图识别测试
+mixed.png	RShot 截图 OCR 2026

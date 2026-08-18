@@ -9,6 +9,8 @@
 > 更新规则：问题边界、交互状态、数据所有权、输出格式、平台依赖、故障恢复或资源策略变化时，同步更新本文档
 >
 > 发布自测：Release 构建提供隐藏的 `--rshot-session-self-test <path>` 进程角色。它只使用无窗口适配器驱动生产截图会话和贴图集合，并调用真实 OCR worker，输出固定 JSON 场景列表；该入口用于自动化门禁，不替代 DPI、多屏、IME 和真实指针的交互验收。
+>
+> OCR 样本门禁：`fixtures/ocr/manifest.tsv` 独立记录英文、中文和中英混排图片的期望规范化文本；Release 构建通过 `--rshot-ocr-corpus-self-test <manifest> <report>` 加载版本化 PNG、调用真实 worker 并逐字比较。报告只包含通过数量，不包含 OCR 文本或图片内容。
 
 ## 记录目的
 
