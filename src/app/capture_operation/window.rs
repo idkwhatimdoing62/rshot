@@ -113,11 +113,9 @@ impl Drop for LiveCaptureWindow {
     }
 }
 
-#[cfg(test)]
-pub(super) struct TestCaptureWindow;
+pub(super) struct SelfTestCaptureWindow;
 
-#[cfg(test)]
-impl CaptureWindow for TestCaptureWindow {
+impl CaptureWindow for SelfTestCaptureWindow {
     fn id(&self) -> WindowId {
         WindowId::from_raw(1)
     }

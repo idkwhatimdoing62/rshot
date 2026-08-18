@@ -1,5 +1,8 @@
 mod interaction;
+mod self_test;
 mod window;
+
+pub(super) use self_test::run_pin_coexistence_self_test;
 
 use crate::app::windows_adapter::flush_window_compositor;
 use interaction::PinInteraction;

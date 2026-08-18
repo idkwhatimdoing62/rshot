@@ -8,6 +8,7 @@ mod ocr;
 mod output;
 mod pinned;
 mod render;
+mod session_smoke;
 mod state;
 mod temp_artifact;
 mod windows_adapter;
@@ -398,6 +399,13 @@ impl App {
 }
 
 pub(super) fn entry() {
+    if let Some(result) = session_smoke::try_run_invocation() {
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(5);
+        }
+        return;
+    }
     if let Some(result) = try_export_diagnostics_invocation() {
         match result {
             Ok(_) => return,

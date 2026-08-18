@@ -177,6 +177,10 @@ pub(super) fn try_run_process_role() -> Result<bool, String> {
     Ok(false)
 }
 
+pub(super) fn run_artifact_self_test() -> Result<(), String> {
+    worker::run_ocr_self_test()
+}
+
 #[cfg(test)]
 pub(super) use engine::{
     OcrCharacterData, OcrLineData, OcrRegionData, OcrWordData, is_cjk_language_tag, ocr_region,
