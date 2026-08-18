@@ -2,18 +2,13 @@ use super::geometry::normalized_rect;
 use super::output::{Annotation, Shape};
 
 /// 当前选中的标注工具（编辑模式下左键拖拽用哪个图元）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(super) enum Tool {
+    #[default]
     Pen,
     Line,
     Rect,
     Text,
-}
-
-impl Default for Tool {
-    fn default() -> Self {
-        Tool::Pen
-    }
 }
 
 /// 一条标注的形状：自由画笔（一串点）/ 直线（两点）/ 矩形（两对角点）/ 文字（左上角锚点 + 内容）。
@@ -74,12 +69,11 @@ impl EditorState {
     pub(super) fn set_color(&mut self, index: usize) {
         let color = PALETTE[index];
         self.color = color;
-        if self.text_editing {
-            if let Some(last) = self.annotations.last_mut() {
-                if matches!(last.shape, Shape::Text(..)) {
-                    last.color = color;
-                }
-            }
+        if self.text_editing
+            && let Some(last) = self.annotations.last_mut()
+            && matches!(last.shape, Shape::Text(..))
+        {
+            last.color = color;
         }
     }
 
@@ -118,10 +112,10 @@ impl EditorState {
         };
         if drop {
             self.annotations.pop();
-        } else if dot {
-            if let Some(Shape::Pen(points)) = self.annotations.last_mut().map(|a| &mut a.shape) {
-                points.push(points[0]);
-            }
+        } else if dot
+            && let Some(Shape::Pen(points)) = self.annotations.last_mut().map(|a| &mut a.shape)
+        {
+            points.push(points[0]);
         }
     }
 
@@ -252,8 +246,8 @@ pub(super) fn toolbar_origin(w: i32, h: i32, sel: Option<((i32, i32), (i32, i32)
 
 pub(super) fn toolbar_item_rect(origin: (i32, i32), slot: usize) -> (i32, i32, i32, i32) {
     let mut x = origin.0;
-    for i in 0..slot {
-        x += TOOLBAR_ITEM_WIDTHS[i] + TOOLBAR_GAP;
+    for width in TOOLBAR_ITEM_WIDTHS.iter().take(slot) {
+        x += width + TOOLBAR_GAP;
     }
     (
         x,
@@ -319,8 +313,8 @@ pub(super) fn palette_hit(
     let origin = toolbar_origin(w, h, sel);
     let color_rect = toolbar_item_rect(origin, TOOLBAR_SLOT_COLOR);
     let popup = palette_popup_rect(w, h, color_rect);
-    (0..PALETTE.len()).find_map(|i| {
+    (0..PALETTE.len()).find(|&i| {
         let (x0, y0, x1, y1) = palette_swatch_rect(popup, i);
-        (p.0 >= x0 && p.0 < x1 && p.1 >= y0 && p.1 < y1).then_some(i)
+        p.0 >= x0 && p.0 < x1 && p.1 >= y0 && p.1 < y1
     })
 }

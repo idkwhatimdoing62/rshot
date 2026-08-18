@@ -43,11 +43,11 @@ impl Interaction {
                             return CaptureCommand::None;
                         }
                         if event.physical_key == PhysicalKey::Code(KeyCode::Backspace) {
-                            if let Some(last) = editor!(self).annotations.last_mut() {
-                                if let Shape::Text(_, text) = &mut last.shape {
-                                    text.pop();
-                                    self.bump_revision();
-                                }
+                            if let Some(last) = editor!(self).annotations.last_mut()
+                                && let Shape::Text(_, text) = &mut last.shape
+                            {
+                                text.pop();
+                                self.bump_revision();
                             }
                             self.update_ime_area();
                             self.request_redraw();
@@ -61,17 +61,17 @@ impl Interaction {
                             self.cancel_text();
                             return CaptureCommand::None;
                         }
-                        if let Some(text) = event.text {
-                            if text.chars().all(|c| !c.is_control()) {
-                                if let Some(last) = editor!(self).annotations.last_mut() {
-                                    if let Shape::Text(_, buf) = &mut last.shape {
-                                        buf.push_str(text.as_str());
-                                        self.bump_revision();
-                                    }
-                                }
-                                self.update_ime_area();
-                                self.request_redraw();
+                        if let Some(text) = event.text
+                            && text.chars().all(|c| !c.is_control())
+                        {
+                            if let Some(last) = editor!(self).annotations.last_mut()
+                                && let Shape::Text(_, buf) = &mut last.shape
+                            {
+                                buf.push_str(text.as_str());
+                                self.bump_revision();
                             }
+                            self.update_ime_area();
+                            self.request_redraw();
                         }
                         return CaptureCommand::None;
                     }
@@ -133,25 +133,25 @@ impl Interaction {
                     match ime {
                         Ime::Preedit(text, _cursor) => {
                             // 首次进入组合：若键盘事件已把同样的拼音塞进草稿尾部，先去掉避免重复
-                            if editor!(self).ime_preedit.is_empty() && !text.is_empty() {
-                                if let Some(last) = editor!(self).annotations.last_mut() {
-                                    if let Shape::Text(_, buf) = &mut last.shape {
-                                        let n = text.chars().count();
-                                        let tail: String = buf
-                                            .chars()
-                                            .rev()
-                                            .take(n)
-                                            .collect::<Vec<_>>()
-                                            .into_iter()
-                                            .rev()
-                                            .collect();
-                                        if tail == text {
-                                            for _ in 0..n {
-                                                buf.pop();
-                                            }
-                                            self.bump_revision();
-                                        }
+                            if editor!(self).ime_preedit.is_empty()
+                                && !text.is_empty()
+                                && let Some(last) = editor!(self).annotations.last_mut()
+                                && let Shape::Text(_, buf) = &mut last.shape
+                            {
+                                let n = text.chars().count();
+                                let tail: String = buf
+                                    .chars()
+                                    .rev()
+                                    .take(n)
+                                    .collect::<Vec<_>>()
+                                    .into_iter()
+                                    .rev()
+                                    .collect();
+                                if tail == text {
+                                    for _ in 0..n {
+                                        buf.pop();
                                     }
+                                    self.bump_revision();
                                 }
                             }
                             editor!(self).ime_preedit = text;
@@ -160,11 +160,11 @@ impl Interaction {
                         }
                         Ime::Commit(text) => {
                             editor!(self).ime_preedit.clear();
-                            if let Some(last) = editor!(self).annotations.last_mut() {
-                                if let Shape::Text(_, buf) = &mut last.shape {
-                                    buf.push_str(&text);
-                                    self.bump_revision();
-                                }
+                            if let Some(last) = editor!(self).annotations.last_mut()
+                                && let Shape::Text(_, buf) = &mut last.shape
+                            {
+                                buf.push_str(&text);
+                                self.bump_revision();
                             }
                             self.update_ime_area();
                             self.request_redraw();

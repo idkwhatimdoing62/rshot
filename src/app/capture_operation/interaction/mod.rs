@@ -235,14 +235,13 @@ mod tests {
         let mut interaction = interaction();
         enter_editing(&mut interaction);
         interaction.start_text((5, 7));
-        if let Some(editor) = interaction.editor_mut() {
-            if let Some(crate::app::output::Annotation {
+        if let Some(editor) = interaction.editor_mut()
+            && let Some(crate::app::output::Annotation {
                 shape: crate::app::output::Shape::Text(_, text),
                 ..
             }) = editor.annotations.last_mut()
-            {
-                text.push_str("abc");
-            }
+        {
+            text.push_str("abc");
         }
         interaction.update_ime_area();
         assert_eq!(interaction.ime_requested.expect("IME area").x, 35);

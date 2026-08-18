@@ -32,6 +32,20 @@ pub(super) enum PinFailureStage {
 }
 
 impl PinFailureStage {
+    pub(super) const fn code(self) -> &'static str {
+        match self {
+            Self::AtCapacity => "RSH-PIN-001",
+            Self::CreateWindow => "RSH-PIN-002",
+            Self::CreateContext => "RSH-PIN-003",
+            Self::CreateSurface => "RSH-PIN-004",
+            Self::ResizeSurface => "RSH-PIN-005",
+            Self::AcquireBuffer => "RSH-PIN-006",
+            Self::Present => "RSH-PIN-007",
+            Self::DuplicateWindowId => "RSH-PIN-008",
+            Self::CaptureAlreadyHidden => "RSH-PIN-009",
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::AtCapacity => "贴图数量已达上限",

@@ -2,6 +2,16 @@
 
 一个轻量的 Windows 截图工具，使用 Rust 编写。支持冻屏框选、窗口自动锁定、图片文字识别、画笔标注、置顶贴图、托盘常驻和全局热键。
 
+## 诊断
+
+遇到问题时可以导出不包含截图像素、OCR 文字、窗口标题和用户文档路径的诊断报告：
+
+~~~powershell
+.\rshot.exe --export-diagnostics .\rshot-diagnostics.txt
+~~~
+
+提交 Issue 时附上报告、复现步骤和 Windows 显示缩放信息。发布、升级和回退规则见 RELEASE.md。
+
 **[下载 v0.2.15 完整 ZIP（推荐）](https://github.com/idkwhatimdoing62/rshot/releases/download/v0.2.15/rshot-v0.2.15-windows-x64.zip)**  ·  [仅下载最新版 rshot.exe](https://github.com/idkwhatimdoing62/rshot/releases/latest/download/rshot.exe)
 
 当前稳定版为 **[v0.2.15](https://github.com/idkwhatimdoing62/rshot/releases/tag/v0.2.15)**。该版本已启用完全离线的 PP-OCRv6 高精度识别路径，并通过 60 项自动测试、便携 Release 构建、依赖审计和真实模型推理烟测。
@@ -85,7 +95,7 @@ quit: Alt+D
 diagnostics: true
 ```
 
-`diagnostics: false` 可关闭捕获失败日志。开启时只在同一目录的 `capture-errors.log` 中记录时间、事件名和 `RSH-CAP-xxx` 错误码，不记录坐标、窗口标题或截图内容；文件达到 64 KiB 后停止追加，删除该文件后会重新记录。
+diagnostics: false 可关闭故障日志。开启时只在同一目录的 rshot-diagnostics.log 中记录时间、版本、固定事件名和 RSH-CAP、RSH-RND、RSH-PIN、RSH-OCR、RSH-CLP 错误码，不记录坐标、窗口标题、OCR 文字、文件路径或截图内容；文件达到 64 KiB 后停止追加，删除该文件后会重新记录。
 
 ## 已知限制
 

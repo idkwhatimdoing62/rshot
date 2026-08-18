@@ -21,6 +21,19 @@ pub(super) enum OcrFailureStage {
     ReadResult,
 }
 
+impl OcrFailureStage {
+    pub(super) const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidInput => "RSH-OCR-001",
+            Self::ModelWorkerUnavailable => "RSH-OCR-002",
+            Self::ModelRecognitionFailed => "RSH-OCR-003",
+            Self::WindowsOcrUnavailable => "RSH-OCR-004",
+            Self::WindowsRecognitionFailed => "RSH-OCR-005",
+            Self::ReadResult => "RSH-OCR-006",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct OcrFailure {
     stage: OcrFailureStage,

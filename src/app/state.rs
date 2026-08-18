@@ -36,6 +36,15 @@ pub(super) enum SessionFailureStage {
 }
 
 impl SessionFailureStage {
+    pub(super) const fn code(self) -> &'static str {
+        match self {
+            Self::AccessSurface => "RSH-RND-001",
+            Self::ResizeSurface => "RSH-RND-002",
+            Self::AcquireBuffer => "RSH-RND-003",
+            Self::Present => "RSH-RND-004",
+        }
+    }
+
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::AccessSurface => "访问绘图表面",
@@ -58,6 +67,10 @@ impl SessionFailure {
             stage,
             detail: detail.to_string(),
         }
+    }
+
+    pub(super) const fn stage(&self) -> SessionFailureStage {
+        self.stage
     }
 }
 

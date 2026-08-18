@@ -35,6 +35,7 @@ pub(super) fn blit_rgba_image(
 }
 
 /// 在像素缓冲上画空心矩形边框，`t` 是线的粗细（像素）。color 是 0RGB 的 u32。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_rect(
     buf: &mut [u32],
     w: u32,
@@ -93,6 +94,7 @@ pub(super) fn draw_fill_rect(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_toolbar(
     buf: &mut [u32],
     w: u32,
@@ -262,10 +264,10 @@ pub(super) fn draw_palette_popup(
         0x00101010,
     );
     draw_fill_rect(buf, w, h, popup, 0x00212631);
-    for i in 0..PALETTE.len() {
+    for (i, swatch) in PALETTE.iter().enumerate() {
         let rect = palette_swatch_rect(popup, i);
-        draw_fill_rect(buf, w, h, rect, color_u32(PALETTE[i]));
-        if PALETTE[i] == color {
+        draw_fill_rect(buf, w, h, rect, color_u32(*swatch));
+        if *swatch == color {
             draw_rect(
                 buf,
                 w,
@@ -304,6 +306,7 @@ pub(super) fn draw_palette_popup(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_text(
     buf: &mut [u32],
     w: u32,
@@ -456,6 +459,7 @@ pub(super) fn color_u32(c: [u8; 4]) -> u32 {
 }
 
 /// 把 RGBA 子图以 source-over 混合到显示缓冲（0RGB，无 alpha）。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn blend_rgba_buffer(
     buf: &mut [u32],
     w: u32,

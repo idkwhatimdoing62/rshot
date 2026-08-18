@@ -7,7 +7,7 @@ impl ApplicationHandler for App {
     // 每轮空闲：轮询 global-hotkey 的事件通道
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
         // 启动后立即检查一次，之后每 12 小时检查一次。
-        self.cleanup_temp_files_if_due(Instant::now());
+        self.temp_artifacts.tick(Instant::now());
         while let Ok(ev) = GlobalHotKeyEvent::receiver().try_recv() {
             if ev.state != HotKeyState::Pressed {
                 continue;
@@ -43,6 +43,9 @@ impl ApplicationHandler for App {
         let event = match self.pins.handle_window_event(id, event) {
             PinEventOutcome::Handled => return,
             PinEventOutcome::Failed(failure) => {
+                if self.diagnostics_enabled {
+                    let _ = record_diagnostic(DiagnosticEvent::Pin(failure.stage()));
+                }
                 show_message(
                     &format!("一张置顶贴图发生错误，已单独关闭。\n\n{failure}"),
                     true,

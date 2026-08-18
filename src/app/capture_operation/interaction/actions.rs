@@ -69,9 +69,11 @@ impl Interaction {
         let Some(selection) = self.selection() else {
             return;
         };
-        let mut editor = EditorState::default();
-        editor.tool = self.preferred_tool;
-        editor.color = self.preferred_color;
+        let editor = EditorState {
+            tool: self.preferred_tool,
+            color: self.preferred_color,
+            ..EditorState::default()
+        };
         self.phase = super::InteractionPhase::Editing(super::EditingState { selection, editor });
     }
 
@@ -203,10 +205,10 @@ impl Interaction {
                 CaptureCommand::None
             }
             ToolbarItem::Action(ToolbarAction::Undo) => {
-                if let Some(editor) = self.editor_mut() {
-                    if editor.annotations.pop().is_some() {
-                        self.bump_revision();
-                    }
+                if let Some(editor) = self.editor_mut()
+                    && editor.annotations.pop().is_some()
+                {
+                    self.bump_revision();
                 }
                 self.request_redraw();
                 CaptureCommand::None

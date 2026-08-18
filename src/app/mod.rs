@@ -9,6 +9,7 @@ mod output;
 mod pinned;
 mod render;
 mod state;
+mod temp_artifact;
 mod windows_adapter;
 
 use capture_operation::*;
@@ -22,12 +23,13 @@ use pinned::*;
 #[cfg(test)]
 use render::*;
 use state::*;
+use temp_artifact::*;
 use windows_adapter::*;
 
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
@@ -78,7 +80,8 @@ struct App {
     capture_operation: Option<CaptureOperation>,
 
     pins: PinCollection,
-    last_temp_cleanup: Option<Instant>,
+    clipboard: ClipboardPublisher,
+    temp_artifacts: TempArtifactLifecycle,
 }
 
 impl App {
@@ -117,17 +120,45 @@ impl App {
         };
         operation.set_window_visible(false);
         let outcome = match operation.copy_source() {
-            Ok(source) => image_to_clipboard(source.output.image(), source.owner),
+            Ok(source) => self.clipboard.publish(
+                ClipboardContent::Image(source.output.image()),
+                ClipboardOwner::from_window(source.owner),
+            ),
             Err(error) => {
                 self.restore_after_output_failure("复制", error.output_stage());
                 return;
             }
         };
         if outcome.succeeded() {
-            println!("图片已写入剪贴板：{}", outcome.published().description());
+            println!("图片已写入剪贴板：{}", outcome.format_description());
+            if self.diagnostics_enabled && outcome.has_diagnostics() {
+                eprintln!(
+                    "event=clipboard_publish_degraded formats={:?} detail={}",
+                    outcome.formats(),
+                    outcome.diagnostic_message().replace(['\r', '\n'], " ")
+                );
+            }
             self.close_overlay();
         } else {
-            self.restore_after_image_copy_failure(&outcome.failure_message());
+            if self.diagnostics_enabled {
+                let _ = record_diagnostic(DiagnosticEvent::Clipboard(outcome.stage()));
+                eprintln!(
+                    "event=clipboard_publish_failed stage={:?} certainty={:?} formats={:?} detail={}",
+                    outcome.stage(),
+                    outcome.certainty(),
+                    outcome.formats(),
+                    outcome.diagnostic_message().replace(['\r', '\n'], " ")
+                );
+            }
+            let user_detail = match outcome.stage() {
+                PublishStage::Prepare => "未能准备可发布的图片格式。",
+                PublishStage::Open => "剪贴板正被其他程序占用。",
+                PublishStage::Empty => "无法更新剪贴板中的原有内容。",
+                PublishStage::SetFormat => "未能写入任何可用的图片格式。",
+                PublishStage::Close => "剪贴板没有正常关闭，发布状态不确定。",
+                PublishStage::Complete => "剪贴板发布没有产生可用内容。",
+            };
+            self.restore_after_image_copy_failure(user_detail);
         }
     }
 
@@ -202,8 +233,14 @@ impl App {
                 }
             }
             Ok(recognition)
-                if clipboard_owner
-                    .is_some_and(|owner| text_to_clipboard(&recognition.text, owner)) =>
+                if clipboard_owner.is_some_and(|owner| {
+                    self.clipboard
+                        .publish(
+                            ClipboardContent::Text(&recognition.text),
+                            ClipboardOwner::from_window(owner),
+                        )
+                        .succeeded()
+                }) =>
             {
                 let fallback_reason = recognition.fallback_reason;
                 self.close_overlay();
@@ -240,6 +277,7 @@ impl App {
             }
             Err(error) => {
                 if self.diagnostics_enabled {
+                    let _ = record_diagnostic(DiagnosticEvent::Ocr(error.stage()));
                     eprintln!(
                         "event=ocr_failed model_stage={:?} final_stage={:?}",
                         error.model_stage(),
@@ -268,6 +306,9 @@ impl App {
         let prepared = match self.pins.prepare(event_loop, plan.position, plan.size) {
             Ok(prepared) => prepared,
             Err(failure) if failure.stage() == PinFailureStage::AtCapacity => {
+                if self.diagnostics_enabled {
+                    let _ = record_diagnostic(DiagnosticEvent::Pin(failure.stage()));
+                }
                 operation.set_window_visible(false);
                 show_message(
                     &format!(
@@ -280,6 +321,9 @@ impl App {
                 return;
             }
             Err(failure) => {
+                if self.diagnostics_enabled {
+                    let _ = record_diagnostic(DiagnosticEvent::Pin(failure.stage()));
+                }
                 show_message(
                     &format!("创建置顶贴图失败，当前截图和标注已保留。\n\n{failure}"),
                     true,
@@ -337,24 +381,11 @@ impl App {
     }
 
     fn handle_session_failure(&mut self, failure: SessionFailure) {
+        if self.diagnostics_enabled {
+            let _ = record_diagnostic(DiagnosticEvent::Render(failure.stage()));
+        }
         if let Some(message) = self.take_session_failure_notice(failure) {
             show_message(&message, true);
-        }
-    }
-
-    fn cleanup_temp_files_if_due(&mut self, now: Instant) {
-        if !claim_temp_cleanup_slot(&mut self.last_temp_cleanup, now) {
-            return;
-        }
-        if let Err(error) = std::thread::Builder::new()
-            .name(String::from("rshot-temp-cleanup"))
-            .spawn(|| {
-                if let Err(error) = cleanup_expired_temp_pngs(SystemTime::now()) {
-                    eprintln!("清理 rshot 临时图片失败：{error}");
-                }
-            })
-        {
-            eprintln!("无法启动 rshot 临时图片清理线程：{error}");
         }
     }
 
@@ -366,29 +397,99 @@ impl App {
     }
 }
 
+pub(super) fn entry() {
+    if let Some(result) = try_export_diagnostics_invocation() {
+        match result {
+            Ok(_) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(4);
+            }
+        }
+    }
+    if is_clipboard_self_test_invocation() {
+        if let Err(error) = run_clipboard_self_test() {
+            eprintln!("{error}");
+            std::process::exit(3);
+        }
+        return;
+    }
+    match try_run_process_role() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    }
+    // release 版没控制台，启动出错会闷声退出；这里把错误弹窗告诉用户
+    if let Err(error) = run() {
+        show_message(&format!("rshot 启动失败：\n{error}"), true);
+    }
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
+    // 最开头声明进程为 per-monitor-v2 DPI aware，赶在 EventLoop 和任何截图之前。
+    // 否则高 DPI 屏上 winit 报逻辑尺寸、xcap 截物理尺寸，两者不一致会导致画面斜切。
+    enable_per_monitor_dpi();
+    let _winrt = WinRtApartment::initialize()?;
+
+    let cfg: Config = confy::load("RShot", None)?;
+    let shot_key: HotKey = cfg.hotkey.parse()?;
+    let quit_key: HotKey = cfg.quit.parse()?;
+    let about_message = build_about_message(&cfg.hotkey, &cfg.quit, cfg.diagnostics);
+
+    // manager 要活到事件循环结束，否则热键会被注销，所以一直留在 main 作用域里
+    let manager = GlobalHotKeyManager::new()?;
+    manager.register(shot_key)?;
+    manager.register(quit_key)?;
+
+    println!(
+        "配置文件: {}",
+        confy::get_configuration_file_path("RShot", None)?.display()
+    );
+
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+
+    // 托盘图标：和 manager 一样要留在作用域活到循环结束，否则图标会消失
+    let _tray = TrayIconBuilder::new()
+        .with_tooltip("rshot")
+        .with_icon(make_icon()?)
+        .build()?;
+
+    let app = App {
+        shot_id: shot_key.id, // HotKey 是 Copy，register 后仍可取 id
+        quit_id: quit_key.id,
+        about_message,
+        diagnostics_enabled: cfg.diagnostics,
+        ..Default::default()
+    };
+    event_loop.run_app(app)?;
+
+    drop(manager); // 显式让 manager 活到这里
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         App, CaptureFailureStage, CaptureOperation, CapturePhase, Config, OcrCharacterData,
-        OcrLineData, OcrRegionData, OcrWordData, PALETTE, PublishedImageFormats, SessionFailure,
-        SessionFailureStage, TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT,
-        TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image,
-        build_about_message, build_dib, capture_failure_log_line, claim_temp_cleanup_slot,
-        cleanup_expired_temp_pngs_in, color_u32, crop_image, gdi_text_size,
-        image_clipboard_publish_succeeded, is_cjk_language_tag, is_managed_temp_png,
-        normalized_rect, ocr_region, palette_hit, palette_popup_rect, palette_swatch_rect,
-        prepare_ocr_rgba, prepare_ocr_rgba_for_recognition, prepare_ocr_worker_rgba,
-        rebuild_model_ocr_text, rebuild_ocr_text, record_capture_failure_in, regroup_ocr_lines,
+        OcrLineData, OcrRegionData, OcrWordData, PALETTE, SessionFailure, SessionFailureStage,
+        TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem,
+        blit_rgba_image, build_about_message, capture_failure_log_line, color_u32, crop_image,
+        gdi_text_size, is_cjk_language_tag, normalized_rect, ocr_region, palette_hit,
+        palette_popup_rect, palette_swatch_rect, prepare_ocr_rgba,
+        prepare_ocr_rgba_for_recognition, prepare_ocr_worker_rgba, rebuild_model_ocr_text,
+        rebuild_ocr_text, record_capture_failure_in, regroup_ocr_lines,
         restore_model_cross_region_spacing, restore_model_region_spacing, toolbar_hit,
         toolbar_item, toolbar_item_rect, toolbar_item_slot, toolbar_origin, toolbar_size,
-        unicode_text_bytes, worker_protocol_round_trip, write_unique_temp_png_in,
+        worker_protocol_round_trip,
     };
-    use std::collections::HashSet;
-    use std::fs::{self, FileTimes, OpenOptions};
-    use std::io::Write;
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use xcap::image::{Rgb, RgbImage, RgbaImage};
 
     static TEST_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -469,54 +570,6 @@ mod tests {
                 let _ = fs::remove_dir_all(&self.path);
             }
         }
-    }
-
-    fn create_file_with_mtime(path: &Path, modified: SystemTime) {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .expect("create test file");
-        file.write_all(b"test").expect("write test file");
-        file.set_times(FileTimes::new().set_modified(modified))
-            .expect("set test mtime");
-    }
-
-    #[test]
-    fn dib_header_and_bgr() {
-        // 2×1，一红一绿；stride = (2*3+3)&!3 = 8，总长 40+8 = 48
-        let img = RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
-        let d = build_dib(&img);
-        assert_eq!(d.len(), 48);
-        assert_eq!(&d[0..4], &40u32.to_le_bytes()); // biSize
-        assert_eq!(&d[4..8], &2i32.to_le_bytes()); // biWidth
-        assert_eq!(d[14], 24); // biBitCount 低字节
-        // 像素段：红 → B,G,R = 0,0,255；绿 → 0,255,0
-        assert_eq!(&d[40..46], &[0, 0, 255, 0, 255, 0]);
-    }
-
-    #[test]
-    fn image_copy_closes_only_after_a_format_is_published_and_clipboard_is_closed() {
-        let none = PublishedImageFormats::new(false, false);
-        let dib_only = PublishedImageFormats::new(true, false);
-        let file_only = PublishedImageFormats::new(false, true);
-        let both = PublishedImageFormats::new(true, true);
-
-        assert!(!image_clipboard_publish_succeeded(none, true));
-        assert!(image_clipboard_publish_succeeded(dib_only, true));
-        assert!(image_clipboard_publish_succeeded(file_only, true));
-        assert!(image_clipboard_publish_succeeded(both, true));
-        assert!(!image_clipboard_publish_succeeded(dib_only, false));
-        assert!(!image_clipboard_publish_succeeded(file_only, false));
-        assert!(!image_clipboard_publish_succeeded(both, false));
-        assert!(dib_only.dib());
-        assert!(!dib_only.file());
-        assert!(!file_only.dib());
-        assert!(file_only.file());
-        assert_eq!(none.description(), "无");
-        assert_eq!(dib_only.description(), "位图（CF_DIB）");
-        assert_eq!(file_only.description(), "PNG 文件（CF_HDROP）");
-        assert_eq!(both.description(), "位图（CF_DIB）和 PNG 文件（CF_HDROP）");
     }
 
     #[test]
@@ -1134,17 +1187,6 @@ mod tests {
     }
 
     #[test]
-    fn unicode_clipboard_text_round_trips_chinese_and_emoji() {
-        let bytes = unicode_text_bytes("中文😀\nabc");
-        assert_eq!(&bytes[bytes.len() - 2..], &[0, 0]);
-        let utf16: Vec<u16> = bytes[..bytes.len() - 2]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
-        assert_eq!(String::from_utf16(&utf16).unwrap(), "中文😀\nabc");
-    }
-
-    #[test]
     fn palette_hit_targets_each_swatch() {
         let sel = Some(((300, 200), (600, 500)));
         let origin = toolbar_origin(1920, 1080, sel);
@@ -1200,7 +1242,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "unix_seconds=123 event=capture_failed code=RSH-CAP-004\n"
+            "unix_seconds=123 version=0.3.0-rc.1 event=capture_failed code=RSH-CAP-004\n"
         );
         assert!(!line.contains("cursor"));
         assert!(!line.contains("monitor"));
@@ -1240,6 +1282,17 @@ mod tests {
             app.capture_operation.as_ref().map(CaptureOperation::phase),
             Some(CapturePhase::Selecting)
         );
+    }
+
+    #[test]
+    fn consecutive_capture_sessions_start_and_close_independently() {
+        let mut app = App::default();
+        for (width, height) in [(8, 6), (12, 9)] {
+            install_test_capture(&mut app, RgbaImage::new(width, height));
+            assert!(app.capture_operation.is_some());
+            app.close_overlay();
+            assert!(app.capture_operation.is_none());
+        }
     }
 
     #[test]
@@ -1320,144 +1373,5 @@ mod tests {
         assert_eq!(failure.to_string(), "提交绘制结果失败：device lost");
     }
 
-    #[test]
-    fn temp_png_allocation_is_unique_with_same_timestamp() {
-        let dir = TestTempDir::new();
-        let now = SystemTime::now();
-        let img = RgbaImage::new(2, 2);
-        let mut paths = HashSet::new();
-
-        for _ in 0..32 {
-            let path = write_unique_temp_png_in(&img, dir.path(), now).unwrap();
-            assert_eq!(path.parent(), Some(dir.path()));
-            assert!(is_managed_temp_png(&path));
-            assert!(paths.insert(path.clone()));
-            assert_eq!(&fs::read(path).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
-        }
-    }
-
-    #[test]
-    fn cleanup_removes_only_expired_unprotected_managed_pngs() {
-        let dir = TestTempDir::new();
-        let now = SystemTime::now();
-        let old = now - Duration::from_secs(13 * 60 * 60);
-        let fresh = now - Duration::from_secs(60 * 60);
-        let future = now + Duration::from_secs(60 * 60);
-
-        let expired = dir.path().join("rshot-1-2-3.png");
-        let recent = dir.path().join("rshot-1-2-4.png");
-        let protected = dir.path().join("rshot-1-2-5.png");
-        let future_dated = dir.path().join("rshot-1-2-6.png");
-        let wrong_extension = dir.path().join("rshot-1-2-7.txt");
-        let wrong_prefix = dir.path().join("other-1-2-8.png");
-        let malformed = dir.path().join("rshot-not-managed.png");
-        let named_directory = dir.path().join("rshot-1-2-9.png");
-
-        create_file_with_mtime(&expired, old);
-        create_file_with_mtime(&recent, fresh);
-        create_file_with_mtime(&protected, old);
-        create_file_with_mtime(&future_dated, future);
-        create_file_with_mtime(&wrong_extension, old);
-        create_file_with_mtime(&wrong_prefix, old);
-        create_file_with_mtime(&malformed, old);
-        fs::create_dir(&named_directory).unwrap();
-
-        let removed = cleanup_expired_temp_pngs_in(
-            dir.path(),
-            now,
-            TEMP_PNG_MAX_AGE,
-            std::slice::from_ref(&protected),
-        )
-        .unwrap();
-
-        assert_eq!(removed, 1);
-        assert!(!expired.exists());
-        for path in [
-            recent,
-            protected,
-            future_dated,
-            wrong_extension,
-            wrong_prefix,
-            malformed,
-            named_directory,
-        ] {
-            assert!(path.exists(), "{} should be retained", path.display());
-        }
-    }
-
-    #[test]
-    fn temp_cleanup_runs_immediately_then_every_twelve_hours() {
-        let start = Instant::now();
-        let mut last_attempt = None;
-        assert!(claim_temp_cleanup_slot(&mut last_attempt, start));
-        assert_eq!(last_attempt, Some(start));
-        assert!(!claim_temp_cleanup_slot(&mut last_attempt, start));
-        assert!(!claim_temp_cleanup_slot(
-            &mut last_attempt,
-            start + TEMP_PNG_CLEANUP_INTERVAL - Duration::from_nanos(1)
-        ));
-        assert!(claim_temp_cleanup_slot(
-            &mut last_attempt,
-            start + TEMP_PNG_CLEANUP_INTERVAL
-        ));
-        assert_eq!(last_attempt, Some(start + TEMP_PNG_CLEANUP_INTERVAL));
-    }
-}
-
-pub(super) fn entry() {
-    match try_run_process_role() {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(2);
-        }
-    }
-    // release 版没控制台，启动出错会闷声退出；这里把错误弹窗告诉用户
-    if let Err(error) = run() {
-        show_message(&format!("rshot 启动失败：\n{error}"), true);
-    }
-}
-
-fn run() -> Result<(), Box<dyn Error>> {
-    // 最开头声明进程为 per-monitor-v2 DPI aware，赶在 EventLoop 和任何截图之前。
-    // 否则高 DPI 屏上 winit 报逻辑尺寸、xcap 截物理尺寸，两者不一致会导致画面斜切。
-    enable_per_monitor_dpi();
-    let _winrt = WinRtApartment::initialize()?;
-
-    let cfg: Config = confy::load("RShot", None)?;
-    let shot_key: HotKey = cfg.hotkey.parse()?;
-    let quit_key: HotKey = cfg.quit.parse()?;
-    let about_message = build_about_message(&cfg.hotkey, &cfg.quit, cfg.diagnostics);
-
-    // manager 要活到事件循环结束，否则热键会被注销，所以一直留在 main 作用域里
-    let manager = GlobalHotKeyManager::new()?;
-    manager.register(shot_key)?;
-    manager.register(quit_key)?;
-
-    println!(
-        "配置文件: {}",
-        confy::get_configuration_file_path("RShot", None)?.display()
-    );
-
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-
-    // 托盘图标：和 manager 一样要留在作用域活到循环结束，否则图标会消失
-    let _tray = TrayIconBuilder::new()
-        .with_tooltip("rshot")
-        .with_icon(make_icon()?)
-        .build()?;
-
-    let app = App {
-        shot_id: shot_key.id, // HotKey 是 Copy，register 后仍可取 id
-        quit_id: quit_key.id,
-        about_message,
-        diagnostics_enabled: cfg.diagnostics,
-        ..Default::default()
-    };
-    event_loop.run_app(app)?;
-
-    drop(manager); // 显式让 manager 活到这里
-    Ok(())
+    // Clipboard encoding and managed artifact lifecycle tests live beside their modules.
 }

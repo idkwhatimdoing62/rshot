@@ -1,0 +1,7 @@
+/target
+/.idea/
+/.gitignore
+/claude
+/docs/*
+!/docs/agents/
+!/docs/release/
