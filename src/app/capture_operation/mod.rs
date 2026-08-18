@@ -170,18 +170,16 @@ impl CaptureOperation {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn capture_succeeded_without_window(self, frozen_image: RgbaImage) -> Self {
         self.attach_capture(CapturedSession::new(
             frozen_image,
-            Box::new(window::TestCaptureWindow),
+            Box::new(window::SelfTestCaptureWindow),
             (0, 0),
             (0, 0),
             Vec::new(),
         ))
     }
 
-    #[cfg(test)]
     pub(super) fn ready_without_window(frozen_image: RgbaImage) -> Self {
         Self::begin().capture_succeeded_without_window(frozen_image)
     }

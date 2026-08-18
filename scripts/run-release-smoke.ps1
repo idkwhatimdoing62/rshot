@@ -35,6 +35,29 @@ function Invoke-Smoke([string]$Argument, [string]$Name) {
 Invoke-Smoke '--rshot-ocr-self-test' 'OCR artifact smoke test'
 Invoke-Smoke '--rshot-clipboard-self-test' 'Clipboard consumer smoke test'
 
+$sessionReport = Join-Path ([System.IO.Path]::GetTempPath()) "rshot-session-smoke-$PID.json"
+try {
+    $process = Start-Process -FilePath $resolvedExecutable -ArgumentList @('--rshot-session-self-test', $sessionReport) -PassThru -WindowStyle Hidden
+    if (-not $process.WaitForExit(30000)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        $process.WaitForExit()
+        throw 'Screenshot session smoke test exceeded 30 seconds.'
+    }
+    if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $sessionReport)) {
+        throw "Screenshot session smoke test failed with exit code $($process.ExitCode)."
+    }
+    $sessionResult = Get-Content -LiteralPath $sessionReport -Raw | ConvertFrom-Json
+    $expectedScenarios = @('first_capture', 'consecutive_capture', 'pin_coexistence', 'ocr_with_pin')
+    if ($sessionResult.schema -ne 'rshot_session_smoke_v1' -or
+        @($sessionResult.scenarios).Count -ne $expectedScenarios.Count -or
+        (Compare-Object $expectedScenarios @($sessionResult.scenarios) -SyncWindow 0)) {
+        throw 'Screenshot session smoke report is incomplete.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath $sessionReport -Force -ErrorAction SilentlyContinue
+}
+
 $diagnosticExport = Join-Path ([System.IO.Path]::GetTempPath()) "rshot-diagnostics-$PID.txt"
 try {
     $arguments = @('--export-diagnostics', $diagnosticExport)
