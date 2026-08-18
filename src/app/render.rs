@@ -1,5 +1,6 @@
 use super::editor::*;
-use super::geometry::{crop_image, normalized_rect};
+use super::geometry::normalized_rect;
+use super::output::{Annotation, Shape};
 use super::windows_adapter::{TEXT_FONT_HEIGHT, gdi_render_text_rgba, gdi_text_size};
 use xcap::image::RgbaImage;
 
@@ -31,26 +32,6 @@ pub(super) fn blit_rgba_image(
             *pixel = (source[i] as u32) << 16 | (source[i + 1] as u32) << 8 | source[i + 2] as u32;
         }
     }
-}
-
-/// 裁剪原图并按顺序合成标注。这里不接触窗口、Surface 或剪贴板。
-pub(super) fn compose_output(
-    image: &RgbaImage,
-    selection: Option<((i32, i32), (i32, i32))>,
-    annotations: &[Annotation],
-) -> Option<RgbaImage> {
-    let mut output = match selection {
-        Some((a, b)) => crop_image(image, a, b)?,
-        None => image.clone(),
-    };
-    let offset = selection
-        .map(normalized_rect)
-        .map(|rect| (rect.0, rect.1))
-        .unwrap_or((0, 0));
-    for annotation in annotations {
-        draw_annotation_image(&mut output, annotation, offset);
-    }
-    Some(output)
 }
 
 /// 在像素缓冲上画空心矩形边框，`t` 是线的粗细（像素）。color 是 0RGB 的 u32。
@@ -469,59 +450,10 @@ pub(super) fn draw_line_buffer(
     }
 }
 
-pub(super) fn draw_line_image(
-    img: &mut RgbaImage,
-    a: (i32, i32),
-    b: (i32, i32),
-    color: [u8; 4],
-    radius: i32,
-) {
-    let dx = b.0 - a.0;
-    let dy = b.1 - a.1;
-    let steps = dx.abs().max(dy.abs()).max(1);
-    for i in 0..=steps {
-        let x = a.0 + dx * i / steps;
-        let y = a.1 + dy * i / steps;
-        for oy in -radius..=radius {
-            for ox in -radius..=radius {
-                let (px, py) = (x + ox, y + oy);
-                if ox * ox + oy * oy <= radius * radius
-                    && px >= 0
-                    && py >= 0
-                    && px < img.width() as i32
-                    && py < img.height() as i32
-                {
-                    img.put_pixel(px as u32, py as u32, xcap::image::Rgba(color));
-                }
-            }
-        }
-    }
-}
-
-/// 直角矩形边框（画进 RGBA 图，供输出用）。t 是边框粗细。
-pub(super) fn draw_rect_image(
-    img: &mut RgbaImage,
-    a: (i32, i32),
-    b: (i32, i32),
-    color: [u8; 4],
-    t: i32,
-) {
-    let (left, top, right, bottom) = normalized_rect((a, b));
-    for d in 0..t {
-        draw_line_image(img, (left, top + d), (right, top + d), color, 0);
-        draw_line_image(img, (left, bottom - d), (right, bottom - d), color, 0);
-        draw_line_image(img, (left + d, top), (left + d, bottom), color, 0);
-        draw_line_image(img, (right - d, top), (right - d, bottom), color, 0);
-    }
-}
-
 /// RGBA 颜色 → 显示缓冲用的 0RGB u32。
 pub(super) fn color_u32(c: [u8; 4]) -> u32 {
     (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32
 }
-
-/// 画笔/直线的线宽（半径，直径 = 2*radius+1 = 3px），与矩形边框 t=3 保持一致。
-pub(super) const ANNOT_LINE_T: i32 = 1;
 
 /// 把 RGBA 子图以 source-over 混合到显示缓冲（0RGB，无 alpha）。
 pub(super) fn blend_rgba_buffer(
@@ -555,33 +487,6 @@ pub(super) fn blend_rgba_buffer(
     }
 }
 
-/// 把 RGBA 子图以 source-over 混合到 RGBA 图。
-pub(super) fn blend_rgba_image(img: &mut RgbaImage, x: i32, y: i32, rgba: &[u8], tw: i32, th: i32) {
-    for j in 0..th {
-        for i in 0..tw {
-            let idx = ((j * tw + i) * 4) as usize;
-            let a = rgba[idx + 3] as u32;
-            if a == 0 {
-                continue;
-            }
-            let (px, py) = (x + i, y + j);
-            if px < 0 || py < 0 || px >= img.width() as i32 || py >= img.height() as i32 {
-                continue;
-            }
-            let dst = img.get_pixel(px as u32, py as u32).0;
-            let inv = 255 - a;
-            let or = (rgba[idx] as u32 * a + dst[0] as u32 * inv) / 255;
-            let og = (rgba[idx + 1] as u32 * a + dst[1] as u32 * inv) / 255;
-            let ob = (rgba[idx + 2] as u32 * a + dst[2] as u32 * inv) / 255;
-            img.put_pixel(
-                px as u32,
-                py as u32,
-                xcap::image::Rgba([or as u8, og as u8, ob as u8, 255]),
-            );
-        }
-    }
-}
-
 pub(super) fn draw_text_buffer(
     buf: &mut [u32],
     w: u32,
@@ -592,12 +497,6 @@ pub(super) fn draw_text_buffer(
 ) {
     if let Some((tw, th, rgba)) = gdi_render_text_rgba(text, color) {
         blend_rgba_buffer(buf, w, h, pos.0, pos.1, &rgba, tw, th);
-    }
-}
-
-pub(super) fn draw_text_image(img: &mut RgbaImage, text: &str, pos: (i32, i32), color: [u8; 4]) {
-    if let Some((tw, th, rgba)) = gdi_render_text_rgba(text, color) {
-        blend_rgba_image(img, pos.0, pos.1, &rgba, tw, th);
     }
 }
 
@@ -648,53 +547,5 @@ pub(super) fn draw_text_edit_box(
                 1,
             );
         }
-    }
-}
-
-/// 把一条标注画到显示缓冲（窗口内坐标）。
-pub(super) fn draw_annotation_buffer(buf: &mut [u32], w: u32, h: u32, ann: &Annotation) {
-    let c = color_u32(ann.color);
-    match &ann.shape {
-        Shape::Pen(points) => {
-            for pair in points.windows(2) {
-                draw_line_buffer(buf, w, h, pair[0], pair[1], c, ANNOT_LINE_T);
-            }
-        }
-        Shape::Line(a, b) => draw_line_buffer(buf, w, h, *a, *b, c, ANNOT_LINE_T),
-        Shape::Rect(a, b) => draw_rect(buf, w, h, a.0, a.1, b.0, b.1, c, 3),
-        Shape::Text(pos, text) => draw_text_buffer(buf, w, h, text, *pos, ann.color),
-    }
-}
-
-/// 把一条标注画到输出图（坐标按选区偏移换算）。
-pub(super) fn draw_annotation_image(img: &mut RgbaImage, ann: &Annotation, offset: (i32, i32)) {
-    let o = offset;
-    match &ann.shape {
-        Shape::Pen(points) => {
-            for pair in points.windows(2) {
-                draw_line_image(
-                    img,
-                    (pair[0].0 - o.0, pair[0].1 - o.1),
-                    (pair[1].0 - o.0, pair[1].1 - o.1),
-                    ann.color,
-                    ANNOT_LINE_T,
-                );
-            }
-        }
-        Shape::Line(a, b) => draw_line_image(
-            img,
-            (a.0 - o.0, a.1 - o.1),
-            (b.0 - o.0, b.1 - o.1),
-            ann.color,
-            ANNOT_LINE_T,
-        ),
-        Shape::Rect(a, b) => draw_rect_image(
-            img,
-            (a.0 - o.0, a.1 - o.1),
-            (b.0 - o.0, b.1 - o.1),
-            ann.color,
-            3,
-        ),
-        Shape::Text(pos, text) => draw_text_image(img, text, (pos.0 - o.0, pos.1 - o.1), ann.color),
     }
 }

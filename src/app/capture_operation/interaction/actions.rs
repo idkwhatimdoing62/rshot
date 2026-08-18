@@ -1,7 +1,8 @@
 use super::{ImeCursorArea, Interaction};
 use crate::app::capture_operation::CaptureCommand;
-use crate::app::editor::{EditorState, Shape, ToolbarAction, ToolbarItem};
+use crate::app::editor::{EditorState, ToolbarAction, ToolbarItem};
 use crate::app::geometry::selection_has_area;
+use crate::app::output::Shape;
 use crate::app::windows_adapter::TEXT_FONT_HEIGHT;
 
 impl Interaction {

@@ -8,14 +8,14 @@ pub(super) use frame::CaptureFrame;
 
 use super::geometry::RectI;
 use super::geometry::normalized_rect;
-use super::render::compose_output;
+#[cfg(test)]
+use super::output::{Annotation, Shape};
+use super::output::{OutputDescription, OutputFailureStage, compose};
 use super::state::SessionFailure;
 use interaction::{Interaction, InteractionConfig, InteractionOutcome};
-use std::borrow::Cow;
 use std::time::Instant;
 use xcap::image::RgbaImage;
 
-use attempt::CaptureVisibilityLease;
 pub(super) use attempt::{CaptureAttemptContext, CaptureAttemptFailure};
 
 #[cfg(test)]
@@ -40,12 +40,21 @@ pub(super) enum CaptureAccessError {
     NotReady,
     WindowUnavailable,
     StalePlan,
-    ImageUnavailable,
+    Output(OutputFailureStage),
+}
+
+impl CaptureAccessError {
+    pub(super) const fn output_stage(self) -> Option<OutputFailureStage> {
+        match self {
+            Self::Output(stage) => Some(stage),
+            _ => None,
+        }
+    }
 }
 
 pub(super) struct CopySource<'a> {
     pub(super) owner: windows::Win32::Foundation::HWND,
-    pub(super) image: Cow<'a, RgbaImage>,
+    pub(super) output: super::output::ScreenshotOutput<'a>,
 }
 
 pub(super) struct OcrSource<'a> {
@@ -58,11 +67,16 @@ pub(super) struct PinPlan {
     revision: u64,
     pub(super) position: winit::dpi::PhysicalPosition<i32>,
     pub(super) size: winit::dpi::PhysicalSize<u32>,
+    image: PreparedPinImage,
+}
+
+enum PreparedPinImage {
+    ReuseFrozen,
+    Owned(RgbaImage),
 }
 
 pub(super) struct PinCommit {
     image: RgbaImage,
-    visibility: Option<CaptureVisibilityLease>,
 }
 
 pub(super) struct CaptureOperation {
@@ -86,11 +100,9 @@ pub(super) struct CapturedSession {
     cursor: (i32, i32),
     origin: (i32, i32),
     windows: Vec<RectI>,
-    visibility: Option<CaptureVisibilityLease>,
 }
 
 impl CapturedSession {
-    #[cfg(test)]
     pub(super) fn new(
         frozen_image: RgbaImage,
         window: Box<dyn window::CaptureWindow>,
@@ -98,24 +110,12 @@ impl CapturedSession {
         origin: (i32, i32),
         windows: Vec<RectI>,
     ) -> Self {
-        Self::new_with_visibility(frozen_image, window, cursor, origin, windows, None)
-    }
-
-    fn new_with_visibility(
-        frozen_image: RgbaImage,
-        window: Box<dyn window::CaptureWindow>,
-        cursor: (i32, i32),
-        origin: (i32, i32),
-        windows: Vec<RectI>,
-        visibility: Option<CaptureVisibilityLease>,
-    ) -> Self {
         Self {
             frozen_image,
             window,
             cursor,
             origin,
             windows,
-            visibility,
         }
     }
 }
@@ -124,7 +124,6 @@ pub(super) struct CaptureSession {
     pub(super) window: Option<Box<dyn window::CaptureWindow>>,
     frozen_image: RgbaImage,
     interaction: Interaction,
-    visibility: Option<CaptureVisibilityLease>,
 }
 
 impl CaptureOperation {
@@ -161,7 +160,6 @@ impl CaptureOperation {
         Self {
             state: CaptureState::Session(Box::new(CaptureSession {
                 window: Some(captured.window),
-                visibility: captured.visibility,
                 ..CaptureSession::new(
                     captured.frozen_image,
                     captured.cursor,
@@ -212,8 +210,8 @@ impl CaptureOperation {
         if let Some(editor) = session.interaction.editor_mut() {
             editor.text_editing = true;
             editor.ime_preedit = preedit.to_owned();
-            editor.annotations.push(super::editor::Annotation {
-                shape: super::editor::Shape::Text((1, 1), text.to_owned()),
+            editor.annotations.push(Annotation {
+                shape: Shape::Text((1, 1), text.to_owned()),
                 color: super::editor::PALETTE[0],
             });
         }
@@ -316,19 +314,13 @@ impl CaptureOperation {
             .as_ref()
             .and_then(|window| window.owner_hwnd())
             .ok_or(CaptureAccessError::WindowUnavailable)?;
-        let image = if snapshot.selection.is_none() && snapshot.annotations.is_empty() {
-            Cow::Borrowed(&session.frozen_image)
-        } else {
-            Cow::Owned(
-                compose_output(
-                    &session.frozen_image,
-                    snapshot.selection,
-                    snapshot.annotations,
-                )
-                .ok_or(CaptureAccessError::ImageUnavailable)?,
-            )
-        };
-        Ok(CopySource { owner, image })
+        let output = compose(OutputDescription {
+            frozen_image: &session.frozen_image,
+            selection: snapshot.selection,
+            annotations: snapshot.annotations,
+        })
+        .map_err(CaptureAccessError::Output)?;
+        Ok(CopySource { owner, output })
     }
 
     pub(super) fn ocr_source(&mut self) -> Result<OcrSource<'_>, CaptureAccessError> {
@@ -353,16 +345,13 @@ impl CaptureOperation {
             return Err(CaptureAccessError::NotReady);
         };
         let snapshot = session.interaction.output_snapshot();
-        let (width, height) = snapshot
-            .selection
-            .map(normalized_rect)
-            .map(|rect| {
-                (
-                    (rect.2 - rect.0).max(1) as u32,
-                    (rect.3 - rect.1).max(1) as u32,
-                )
-            })
-            .unwrap_or_else(|| session.frozen_image.dimensions());
+        let output = compose(OutputDescription {
+            frozen_image: &session.frozen_image,
+            selection: snapshot.selection,
+            annotations: snapshot.annotations,
+        })
+        .map_err(CaptureAccessError::Output)?;
+        let (width, height) = output.dimensions();
         let position = snapshot
             .selection
             .map(normalized_rect)
@@ -378,10 +367,16 @@ impl CaptureOperation {
                     session.interaction.origin().1,
                 )
             });
+        let image = if output.is_borrowed() {
+            PreparedPinImage::ReuseFrozen
+        } else {
+            PreparedPinImage::Owned(output.into_owned())
+        };
         Ok(PinPlan {
             revision: snapshot.revision,
             position,
             size: winit::dpi::PhysicalSize::new(width.max(56), height.max(44)),
+            image,
         })
     }
 
@@ -396,36 +391,14 @@ impl CaptureOperation {
         if snapshot.revision != plan.revision {
             return Err((self, CaptureAccessError::StalePlan));
         }
-        let image = if snapshot.selection.is_none() && snapshot.annotations.is_empty() {
-            None
-        } else {
-            compose_output(
-                &session.frozen_image,
-                snapshot.selection,
-                snapshot.annotations,
-            )
+        let image = match plan.image {
+            PreparedPinImage::Owned(image) => image,
+            PreparedPinImage::ReuseFrozen => match &mut self.state {
+                CaptureState::Session(session) => std::mem::take(&mut session.frozen_image),
+                CaptureState::Preparing => unreachable!("validated ready session"),
+            },
         };
-        let image = match image {
-            Some(image) => image,
-            None if snapshot.selection.is_none() && snapshot.annotations.is_empty() => {
-                match &mut self.state {
-                    CaptureState::Session(session) => std::mem::take(&mut session.frozen_image),
-                    CaptureState::Preparing => unreachable!("validated ready session"),
-                }
-            }
-            None => return Err((self, CaptureAccessError::ImageUnavailable)),
-        };
-        let visibility = match &mut self.state {
-            CaptureState::Session(session) => session.visibility.take(),
-            CaptureState::Preparing => unreachable!("validated ready session"),
-        };
-        Ok(PinCommit { image, visibility })
-    }
-}
-
-impl Drop for PinCommit {
-    fn drop(&mut self) {
-        drop(self.visibility.take());
+        Ok(PinCommit { image })
     }
 }
 
@@ -452,7 +425,6 @@ impl CaptureSession {
             window: None,
             frozen_image,
             interaction,
-            visibility: None,
         }
     }
 
@@ -621,6 +593,17 @@ mod tests {
         let plan = operation.prepare_pin().expect("pin plan");
 
         assert_eq!(plan.size, PhysicalSize::new(400, 400));
+    }
+
+    #[test]
+    fn unchanged_full_image_pin_plan_reuses_the_frozen_image() {
+        let mut operation = CaptureOperation::begin().capture_succeeded_without_window(
+            RgbaImage::from_raw(120, 80, vec![0; 120 * 80 * 4]).expect("valid frozen image"),
+        );
+
+        let plan = operation.prepare_pin().expect("pin plan");
+
+        assert!(matches!(plan.image, super::PreparedPinImage::ReuseFrozen));
     }
 
     #[test]

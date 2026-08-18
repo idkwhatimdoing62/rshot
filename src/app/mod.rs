@@ -5,6 +5,7 @@ mod editor;
 mod geometry;
 mod handler;
 mod ocr;
+mod output;
 mod pinned;
 mod render;
 mod state;
@@ -16,6 +17,7 @@ use diagnostics::*;
 use editor::*;
 use geometry::*;
 use ocr::*;
+use output::*;
 use pinned::*;
 #[cfg(test)]
 use render::*;
@@ -115,9 +117,9 @@ impl App {
         };
         operation.set_window_visible(false);
         let outcome = match operation.copy_source() {
-            Ok(source) => image_to_clipboard(source.image.as_ref(), source.owner),
-            Err(_) => {
-                self.restore_after_image_copy_failure("无法生成要复制的截图图像。");
+            Ok(source) => image_to_clipboard(source.output.image(), source.owner),
+            Err(error) => {
+                self.restore_after_output_failure("复制", error.output_stage());
                 return;
             }
         };
@@ -133,6 +135,23 @@ impl App {
         show_message(
             &format!(
                 "复制图片失败，当前截图和标注已保留。\n\n{detail}\n\n请稍后重试；若剪贴板被其他程序占用，请先关闭相关程序。"
+            ),
+            true,
+        );
+        if let Some(operation) = &self.capture_operation {
+            operation.set_window_visible(true);
+            operation.request_redraw();
+        }
+    }
+
+    fn restore_after_output_failure(&self, action: &str, stage: Option<OutputFailureStage>) {
+        let detail = stage.map_or_else(
+            || String::from("截图会话当前不能生成输出"),
+            |stage| format!("{}（{}）", stage.description(), stage.code()),
+        );
+        show_message(
+            &format!(
+                "{action}截图失败，当前截图和标注已保留。\n\n{detail}\n\n请调整选区或稍后重试。"
             ),
             true,
         );
@@ -239,8 +258,12 @@ impl App {
         let Some(operation) = self.capture_operation.as_mut() else {
             return;
         };
-        let Ok(plan) = operation.prepare_pin() else {
-            return;
+        let plan = match operation.prepare_pin() {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.restore_after_output_failure("转为置顶贴图", error.output_stage());
+                return;
+            }
         };
         let prepared = match self.pins.prepare(event_loop, plan.position, plan.size) {
             Ok(prepared) => prepared,
@@ -269,8 +292,9 @@ impl App {
         };
         let mut commit = match operation.commit_pin(plan) {
             Ok(commit) => commit,
-            Err((operation, _)) => {
+            Err((operation, error)) => {
                 self.capture_operation = Some(operation);
+                self.restore_after_output_failure("转为置顶贴图", error.output_stage());
                 return;
             }
         };
@@ -345,13 +369,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        Annotation, App, CaptureFailureStage, CaptureOperation, CapturePhase, Config,
-        OcrCharacterData, OcrLineData, OcrRegionData, OcrWordData, PALETTE, PublishedImageFormats,
-        SessionFailure, SessionFailureStage, Shape, TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE,
-        TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem,
-        blit_rgba_image, build_about_message, build_dib, capture_failure_log_line,
-        claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in, color_u32, crop_image,
-        draw_annotation_image, draw_line_image, draw_rect_image, gdi_text_size,
+        App, CaptureFailureStage, CaptureOperation, CapturePhase, Config, OcrCharacterData,
+        OcrLineData, OcrRegionData, OcrWordData, PALETTE, PublishedImageFormats, SessionFailure,
+        SessionFailureStage, TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT,
+        TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image,
+        build_about_message, build_dib, capture_failure_log_line, claim_temp_cleanup_slot,
+        cleanup_expired_temp_pngs_in, color_u32, crop_image, gdi_text_size,
         image_clipboard_publish_succeeded, is_cjk_language_tag, is_managed_temp_png,
         normalized_rect, ocr_region, palette_hit, palette_popup_rect, palette_swatch_rect,
         prepare_ocr_rgba, prepare_ocr_rgba_for_recognition, prepare_ocr_worker_rgba,
@@ -504,14 +527,6 @@ mod tests {
         assert_eq!(normalized_rect(((9, 7), (-3, 2))), (-3, 2, 9, 7));
         assert!(crop_image(&img, (1, 3), (8, 3)).is_none());
         assert!(crop_image(&img, (4, 1), (4, 7)).is_none());
-    }
-
-    #[test]
-    fn pen_draws_into_output_image() {
-        let mut img = RgbaImage::new(20, 20);
-        draw_line_image(&mut img, (2, 2), (17, 17), [255, 45, 45, 255], 2);
-        assert_eq!(img.get_pixel(10, 10).0, [255, 45, 45, 255]);
-        assert_eq!(img.get_pixel(19, 0).0, [0, 0, 0, 0]);
     }
 
     #[test]
@@ -1153,49 +1168,6 @@ mod tests {
         for c in PALETTE {
             assert!(seen.insert(color_u32(c)), "duplicate palette color {c:?}");
         }
-    }
-
-    #[test]
-    fn rect_annotation_draws_border_only() {
-        let mut img = RgbaImage::new(20, 20);
-        draw_rect_image(&mut img, (4, 4), (14, 14), [255, 0, 0, 255], 3);
-        assert_eq!(img.get_pixel(9, 4).0, [255, 0, 0, 255]); // 上边线
-        assert_eq!(img.get_pixel(5, 5).0, [255, 0, 0, 255]); // 左边线
-        assert_eq!(img.get_pixel(9, 9).0, [0, 0, 0, 0]); // 内部透明
-    }
-
-    #[test]
-    fn line_annotation_uses_its_color() {
-        let mut img = RgbaImage::new(20, 20);
-        let ann = Annotation {
-            shape: Shape::Line((2, 2), (17, 17)),
-            color: [0, 200, 0, 255],
-        };
-        draw_annotation_image(&mut img, &ann, (0, 0));
-        assert_eq!(img.get_pixel(10, 10).0, [0, 200, 0, 255]);
-    }
-
-    #[test]
-    fn annotation_image_respects_selection_offset() {
-        let mut img = RgbaImage::new(20, 20);
-        let ann = Annotation {
-            shape: Shape::Rect((10, 10), (14, 14)),
-            color: [0, 0, 255, 255],
-        };
-        draw_annotation_image(&mut img, &ann, (8, 8));
-        assert_eq!(img.get_pixel(5, 5).0, [0, 0, 255, 255]); // 10-8=2 处的边框→画在(2..6)
-    }
-
-    #[test]
-    fn text_annotation_draws_into_image() {
-        // GDI 文字渲染在 CI 环境可能没有字体，此处只验证能端到端跑通不 panic
-        let mut img = RgbaImage::new(200, 60);
-        let ann = Annotation {
-            shape: Shape::Text((10, 10), String::from("Ab1 测试")),
-            color: [255, 0, 0, 255],
-        };
-        draw_annotation_image(&mut img, &ann, (0, 0));
-        let _ = img;
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::geometry::normalized_rect;
+use super::output::{Annotation, Shape};
 
 /// 当前选中的标注工具（编辑模式下左键拖拽用哪个图元）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,21 +17,6 @@ impl Default for Tool {
 }
 
 /// 一条标注的形状：自由画笔（一串点）/ 直线（两点）/ 矩形（两对角点）/ 文字（左上角锚点 + 内容）。
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum Shape {
-    Pen(Vec<(i32, i32)>),
-    Line((i32, i32), (i32, i32)),
-    Rect((i32, i32), (i32, i32)),
-    Text((i32, i32), String),
-}
-
-/// 一条标注 = 形状 + 颜色（RGBA，输出图直接用；显示缓冲按 0RGB 转换）。
-#[derive(Clone, Debug)]
-pub(super) struct Annotation {
-    pub(super) shape: Shape,
-    pub(super) color: [u8; 4],
-}
-
 /// 预设调色板：PEN 默认红放在第一位。
 pub(super) const PALETTE: [[u8; 4]; 8] = [
     [255, 45, 45, 255],   // 红

@@ -5,8 +5,9 @@ mod state;
 use super::CaptureCommand;
 #[cfg(test)]
 use super::CapturePhase;
-use crate::app::editor::{Annotation, EditorState};
+use crate::app::editor::EditorState;
 use crate::app::geometry::RectI;
+use crate::app::output::Annotation;
 use crate::app::windows_adapter::gdi_text_size;
 use std::time::{Duration, Instant};
 
@@ -235,8 +236,8 @@ mod tests {
         enter_editing(&mut interaction);
         interaction.start_text((5, 7));
         if let Some(editor) = interaction.editor_mut() {
-            if let Some(crate::app::editor::Annotation {
-                shape: crate::app::editor::Shape::Text(_, text),
+            if let Some(crate::app::output::Annotation {
+                shape: crate::app::output::Shape::Text(_, text),
                 ..
             }) = editor.annotations.last_mut()
             {

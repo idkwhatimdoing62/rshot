@@ -1,4 +1,5 @@
-use crate::app::editor::{Annotation, EditorState, Tool};
+use crate::app::editor::{EditorState, Tool};
+use crate::app::output::{Annotation, render_preview_annotations};
 use crate::app::render::*;
 use xcap::image::RgbaImage;
 
@@ -51,9 +52,7 @@ pub(super) fn render_frame(buffer: &mut [u32], width: u32, height: u32, frame: &
         shade_outside(buffer, width, height, a, b);
         draw_rect(buffer, width, height, a.0, a.1, b.0, b.1, 0x00FF0000, 3);
     }
-    for annotation in frame.annotations {
-        draw_annotation_buffer(buffer, width, height, annotation);
-    }
+    render_preview_annotations(buffer, width, height, frame.annotations);
     if frame.editing {
         if frame.text_editing
             && let Some(annotation) = frame.annotations.last()

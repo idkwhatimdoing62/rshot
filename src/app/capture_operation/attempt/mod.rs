@@ -1,14 +1,11 @@
 mod platform;
 mod target;
-mod visibility;
 
 use super::CapturedSession;
 use crate::app::pinned::PinCollection;
 use crate::app::state::CaptureFailureStage;
 use platform::*;
 use target::match_overlay_monitor;
-
-pub(in crate::app) use visibility::CaptureVisibilityLease;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::app) struct CaptureAttemptFailure {
@@ -45,14 +42,16 @@ pub(super) fn capture(
     let monitor = capture_monitor(cursor).map_err(CaptureAttemptFailure::at)?;
     let target = match_overlay_monitor(context.event_loop, cursor)
         .ok_or_else(|| CaptureAttemptFailure::at(CaptureFailureStage::MatchOverlayMonitor))?;
-    let visibility = context
-        .pins
-        .hide_for_capture()
-        .map_err(|failure| CaptureAttemptFailure {
-            stage: CaptureFailureStage::HidePins,
-            detail: failure.to_string(),
-        })?;
+    let mut visibility =
+        context
+            .pins
+            .hide_for_capture()
+            .map_err(|failure| CaptureAttemptFailure {
+                stage: CaptureFailureStage::HidePins,
+                detail: failure.to_string(),
+            })?;
     let frozen_image = capture_image(&monitor).map_err(CaptureAttemptFailure::at)?;
+    visibility.complete_capture();
     let windows = visible_windows();
     let window = create_overlay(context.event_loop, target.overlay_monitor).map_err(|failure| {
         CaptureAttemptFailure {
@@ -60,12 +59,11 @@ pub(super) fn capture(
             detail: failure.detail,
         }
     })?;
-    Ok(CapturedSession::new_with_visibility(
+    Ok(CapturedSession::new(
         frozen_image,
         Box::new(window),
         cursor,
         target.origin,
         windows,
-        Some(visibility),
     ))
 }

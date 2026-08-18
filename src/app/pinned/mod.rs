@@ -126,6 +126,14 @@ pub(in crate::app) struct CaptureVisibilityLease {
     collection: Option<PinCollection>,
 }
 
+impl CaptureVisibilityLease {
+    pub(in crate::app) fn complete_capture(&mut self) {
+        if let Some(collection) = self.collection.take() {
+            collection.restore_after_capture();
+        }
+    }
+}
+
 pub(super) struct PreparedPin {
     collection: PinCollection,
     window: Option<Box<dyn PinWindow>>,
@@ -347,9 +355,7 @@ impl Drop for PreparedPin {
 
 impl Drop for CaptureVisibilityLease {
     fn drop(&mut self) {
-        if let Some(collection) = self.collection.take() {
-            collection.restore_after_capture();
-        }
+        self.complete_capture();
     }
 }
 
@@ -636,6 +642,29 @@ mod tests {
             2
         );
         assert_eq!(calls.iter().filter(|call| *call == "flush").count(), 2);
+    }
+
+    #[test]
+    fn completing_pixel_capture_restores_pins_before_the_session_continues() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let collection = collection(calls.clone());
+        commit_window(&collection, 1, calls.clone());
+        calls.borrow_mut().clear();
+
+        let mut lease = collection.hide_for_capture().expect("capture lease");
+        lease.complete_capture();
+        drop(lease);
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                "visible:false",
+                "flush",
+                "visible:true",
+                "request_redraw",
+                "flush"
+            ]
+        );
     }
 
     #[test]
