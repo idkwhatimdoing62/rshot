@@ -35,4 +35,28 @@ function Invoke-Smoke([string]$Argument, [string]$Name) {
 Invoke-Smoke '--rshot-ocr-self-test' 'OCR artifact smoke test'
 Invoke-Smoke '--rshot-clipboard-self-test' 'Clipboard consumer smoke test'
 
+$diagnosticExport = Join-Path ([System.IO.Path]::GetTempPath()) "rshot-diagnostics-$PID.txt"
+try {
+    $arguments = @('--export-diagnostics', $diagnosticExport)
+    $process = Start-Process -FilePath $resolvedExecutable -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    if (-not $process.WaitForExit(30000)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        $process.WaitForExit()
+        throw 'Diagnostic export smoke test exceeded 30 seconds.'
+    }
+    if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $diagnosticExport)) {
+        throw "Diagnostic export smoke test failed with exit code $($process.ExitCode)."
+    }
+    $report = Get-Content -LiteralPath $diagnosticExport -Raw
+    if ($report -notmatch '^rshot_diagnostics_v1' -or
+        $report -notmatch '(?m)^version=' -or
+        $report -notmatch '(?m)^os=windows$' -or
+        $report -match '(?i)(ocr_text|window_title|document_path|pixel_data)=') {
+        throw 'Diagnostic export smoke test produced an invalid or privacy-unsafe report.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath $diagnosticExport -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host "Release smoke tests passed: $resolvedExecutable"
