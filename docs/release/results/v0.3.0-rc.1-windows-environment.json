@@ -1,0 +1,32 @@
+{
+  "schema": "rshot_windows_regression_environment_v1",
+  "collected_at_utc": "2026-08-18T08:40:01.1110254Z",
+  "windows": {
+    "product_name": "Microsoft Windows 11 Pro (localized)",
+    "version": "10.0.26200.0",
+    "architecture": "X64"
+  },
+  "display": {
+    "system_dpi": 96,
+    "system_scale_percent": 100,
+    "screen_count": 1,
+    "screens": [
+      {
+        "device_name": "\\\\.\\DISPLAY1",
+        "primary": true,
+        "bounds": {
+          "x": 0,
+          "y": 0,
+          "width": 2560,
+          "height": 1440
+        },
+        "working_area": {
+          "x": 0,
+          "y": 0,
+          "width": 2560,
+          "height": 1392
+        }
+      }
+    ]
+  }
+}

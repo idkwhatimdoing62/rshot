@@ -61,6 +61,16 @@
 | B-04 | Upgrade from previous version | Configuration remains valid; old executable can be restored | | |
 | B-05 | Export diagnostics | Report contains version and stable codes, not OCR text, pixels, titles or document paths | | |
 
+## Evidence collection
+
+Before interactive verification, run:
+
+```powershell
+.\scripts\collect-windows-regression-evidence.ps1 -OutputPath .\windows-environment.json
+```
+
+Attach the generated JSON to the release result or its blocking GitHub Issue. It records only OS and display topology metadata; it does not capture pixels, window titles, paths, clipboard contents, or OCR text. A scenario may be marked PASS only when the recorded environment actually represents that scenario. For example, a single-display snapshot cannot close C-04 or C-05.
+
 ## Release decision
 
 | Field | Value |
