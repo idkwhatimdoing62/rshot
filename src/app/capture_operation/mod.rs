@@ -1,31 +1,29 @@
+mod attempt;
 mod event;
 mod frame;
 mod interaction;
 mod window;
 
 pub(super) use frame::CaptureFrame;
-pub(super) use window::LiveCaptureWindow;
 
 use super::geometry::RectI;
 use super::geometry::normalized_rect;
 use super::render::compose_output;
-use super::state::CaptureFailureStage;
 use super::state::SessionFailure;
 use interaction::{Interaction, InteractionConfig, InteractionOutcome};
 use std::borrow::Cow;
 use std::time::Instant;
 use xcap::image::RgbaImage;
 
+use attempt::CaptureVisibilityLease;
+pub(super) use attempt::{CaptureAttemptContext, CaptureAttemptFailure};
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CapturePhase {
     Preparing,
     Selecting,
     Editing,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CaptureEnd {
-    CaptureFailed(CaptureFailureStage),
 }
 
 pub(super) enum CaptureCommand {
@@ -62,6 +60,11 @@ pub(super) struct PinPlan {
     pub(super) size: winit::dpi::PhysicalSize<u32>,
 }
 
+pub(super) struct PinCommit {
+    image: RgbaImage,
+    visibility: Option<CaptureVisibilityLease>,
+}
+
 pub(super) struct CaptureOperation {
     state: CaptureState,
 }
@@ -83,9 +86,11 @@ pub(super) struct CapturedSession {
     cursor: (i32, i32),
     origin: (i32, i32),
     windows: Vec<RectI>,
+    visibility: Option<CaptureVisibilityLease>,
 }
 
 impl CapturedSession {
+    #[cfg(test)]
     pub(super) fn new(
         frozen_image: RgbaImage,
         window: Box<dyn window::CaptureWindow>,
@@ -93,12 +98,24 @@ impl CapturedSession {
         origin: (i32, i32),
         windows: Vec<RectI>,
     ) -> Self {
+        Self::new_with_visibility(frozen_image, window, cursor, origin, windows, None)
+    }
+
+    fn new_with_visibility(
+        frozen_image: RgbaImage,
+        window: Box<dyn window::CaptureWindow>,
+        cursor: (i32, i32),
+        origin: (i32, i32),
+        windows: Vec<RectI>,
+        visibility: Option<CaptureVisibilityLease>,
+    ) -> Self {
         Self {
             frozen_image,
             window,
             cursor,
             origin,
             windows,
+            visibility,
         }
     }
 }
@@ -107,24 +124,27 @@ pub(super) struct CaptureSession {
     pub(super) window: Option<Box<dyn window::CaptureWindow>>,
     frozen_image: RgbaImage,
     interaction: Interaction,
+    visibility: Option<CaptureVisibilityLease>,
 }
 
 impl CaptureOperation {
-    pub(super) fn begin() -> Self {
+    pub(super) fn start(context: CaptureAttemptContext<'_>) -> Result<Self, CaptureAttemptFailure> {
+        let captured = attempt::capture(context)?;
+        Ok(Self::begin().attach_capture(captured))
+    }
+
+    fn begin() -> Self {
         Self {
             state: CaptureState::Preparing,
         }
     }
 
+    #[cfg(test)]
     pub(super) fn phase(&self) -> CapturePhase {
         match &self.state {
             CaptureState::Preparing => CapturePhase::Preparing,
             CaptureState::Session(session) => session.interaction.capture_phase(),
         }
-    }
-
-    pub(super) fn is_preparing(&self) -> bool {
-        self.phase() == CapturePhase::Preparing
     }
 
     pub(super) fn tick(&mut self, now: Instant) -> Option<Instant> {
@@ -141,6 +161,7 @@ impl CaptureOperation {
         Self {
             state: CaptureState::Session(Box::new(CaptureSession {
                 window: Some(captured.window),
+                visibility: captured.visibility,
                 ..CaptureSession::new(
                     captured.frozen_image,
                     captured.cursor,
@@ -160,6 +181,11 @@ impl CaptureOperation {
             (0, 0),
             Vec::new(),
         ))
+    }
+
+    #[cfg(test)]
+    pub(super) fn ready_without_window(frozen_image: RgbaImage) -> Self {
+        Self::begin().capture_succeeded_without_window(frozen_image)
     }
 
     #[cfg(test)]
@@ -241,17 +267,6 @@ impl CaptureOperation {
         if let CaptureState::Session(session) = &mut self.state {
             session.interaction.reselect();
         }
-    }
-
-    pub(super) fn into_frozen_image(self) -> Option<RgbaImage> {
-        match self.state {
-            CaptureState::Session(session) => Some(session.frozen_image),
-            CaptureState::Preparing => None,
-        }
-    }
-
-    pub(super) fn capture_failed(self, stage: CaptureFailureStage) -> CaptureEnd {
-        CaptureEnd::CaptureFailed(stage)
     }
 
     pub(super) fn close(mut self) {
@@ -370,7 +385,10 @@ impl CaptureOperation {
         })
     }
 
-    pub(super) fn commit_pin(self, plan: PinPlan) -> Result<RgbaImage, (Self, CaptureAccessError)> {
+    pub(super) fn commit_pin(
+        mut self,
+        plan: PinPlan,
+    ) -> Result<PinCommit, (Self, CaptureAccessError)> {
         let CaptureState::Session(session) = &self.state else {
             return Err((self, CaptureAccessError::NotReady));
         };
@@ -387,13 +405,33 @@ impl CaptureOperation {
                 snapshot.annotations,
             )
         };
-        match image {
-            Some(image) => Ok(image),
+        let image = match image {
+            Some(image) => image,
             None if snapshot.selection.is_none() && snapshot.annotations.is_empty() => {
-                Ok(self.into_frozen_image().expect("ready session image"))
+                match &mut self.state {
+                    CaptureState::Session(session) => std::mem::take(&mut session.frozen_image),
+                    CaptureState::Preparing => unreachable!("validated ready session"),
+                }
             }
-            None => Err((self, CaptureAccessError::ImageUnavailable)),
-        }
+            None => return Err((self, CaptureAccessError::ImageUnavailable)),
+        };
+        let visibility = match &mut self.state {
+            CaptureState::Session(session) => session.visibility.take(),
+            CaptureState::Preparing => unreachable!("validated ready session"),
+        };
+        Ok(PinCommit { image, visibility })
+    }
+}
+
+impl Drop for PinCommit {
+    fn drop(&mut self) {
+        drop(self.visibility.take());
+    }
+}
+
+impl PinCommit {
+    pub(super) fn take_image(&mut self) -> RgbaImage {
+        std::mem::take(&mut self.image)
     }
 }
 
@@ -414,6 +452,7 @@ impl CaptureSession {
             window: None,
             frozen_image,
             interaction,
+            visibility: None,
         }
     }
 
@@ -468,8 +507,7 @@ impl CaptureSession {
 mod tests {
     use super::interaction::{ImeCursorArea, InteractionOutcome};
     use super::window::CaptureWindow;
-    use super::{CaptureEnd, CaptureOperation, CapturePhase, CapturedSession};
-    use crate::app::state::CaptureFailureStage;
+    use super::{CaptureOperation, CapturePhase, CapturedSession};
     use crate::app::state::SessionFailure;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -501,17 +539,6 @@ mod tests {
             Ok(())
         }
         fn close(&mut self) {}
-    }
-
-    #[test]
-    fn capture_failure_ends_the_preparing_operation_with_a_stable_category() {
-        let operation = CaptureOperation::begin();
-
-        assert_eq!(operation.phase(), CapturePhase::Preparing);
-        assert_eq!(
-            operation.capture_failed(CaptureFailureStage::ReadCursor),
-            CaptureEnd::CaptureFailed(CaptureFailureStage::ReadCursor)
-        );
     }
 
     #[test]

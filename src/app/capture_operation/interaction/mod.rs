@@ -2,7 +2,9 @@ mod actions;
 mod event;
 mod state;
 
-use super::{CaptureCommand, CapturePhase};
+use super::CaptureCommand;
+#[cfg(test)]
+use super::CapturePhase;
 use crate::app::editor::{Annotation, EditorState};
 use crate::app::geometry::RectI;
 use crate::app::windows_adapter::gdi_text_size;
@@ -82,6 +84,7 @@ impl Interaction {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn capture_phase(&self) -> CapturePhase {
         match self.phase {
             InteractionPhase::Selecting(_) => CapturePhase::Selecting,

@@ -269,22 +269,22 @@ classDiagram
 | 记录 | 字段 | 校验与缺省 | 所有者 |
 | --- | --- | --- | --- |
 | `Config` | `hotkey: String`、`quit: String`、`diagnostics: bool` | 默认 `Alt+A`、`Alt+D`、开启诊断；旧配置缺字段时走 serde 默认；热键字符串在启动时解析 | 运行时与配置 |
-| 捕获诊断行 | Unix 秒、`event=capture_failed`、`RSH-CAP-001..004` | 只允许固定字段；底层错误文本不得进入文件 | 捕获诊断 |
+| 捕获诊断行 | Unix 秒、`event=capture_failed`、`RSH-CAP-001..008` | 文件只允许固定字段；底层错误文本仅在启用诊断时写入标准错误 | 捕获诊断 |
 
 配置只在启动时加载，修改后重启生效。配置、WinRT 初始化或热键注册失败属于启动失败，不进入常驻状态。
 
 ### 2.4 捕获尝试与截图会话
 
-捕获尝试先于正式会话存在，用来阻止入口重入和同一次失败重复提示：
+捕获尝试是 `CaptureOperation::start` 内同步完成的事务。它依次读取鼠标、匹配捕获与遮罩显示器、取得贴图隐藏租约、捕获冻结图、读取可见窗口，并创建 Window、Context 和 Surface。只有全部步骤成功才向 `App` 返回正式截图操作；不会把半初始化的 `Preparing` 状态存入应用。
 
-| 情况 | `capture_attempt_active` | Window / Surface / 冻结图 | 结果 |
+| 情况 | 应用持有截图操作 | Window / Surface / 冻结图 | 结果 |
 | --- | --- | --- | --- |
 | 待命 | false | 全部为空 | 可接受截图热键 |
-| 正在定位和捕获 | true | 可以部分为空 | 拒绝第二个截图入口 |
-| 正式活动会话 | false | 三者同时存在 | 选择或编辑 |
-| 捕获/创建失败并清理 | false | 全部为空 | 回到待命 |
+| 正在定位和捕获 | false | 临时资源只存在于调用栈 | 新入口会先结束旧会话，再开始一次新尝试 |
+| 正式活动会话 | true | 三者同时存在 | 选择或编辑 |
+| 捕获/创建失败并清理 | false | 全部为空 | RAII 恢复贴图并回到待命 |
 
-冻结图始终是不含标注的屏幕像素。窗口自动锁定、手动框选、重新选择、OCR 和图片输出都引用同一张冻结图。关闭会话后，冻结图、窗口快照、选区和标注一起释放。
+冻结图始终是不含标注的屏幕像素。窗口自动锁定、手动框选、重新选择、OCR 和图片输出都引用同一张冻结图。截图操作持有贴图隐藏租约；失败、取消、输出或关闭时释放租约并无激活恢复全部贴图。关闭会话后，冻结图、窗口快照、选区和标注一起释放。
 
 ### 2.5 选区、编辑状态与标注
 
@@ -713,7 +713,7 @@ flowchart LR
     Render --> Win
 ```
 
-当前用 `Option<CaptureOperation>` 把捕获尝试、截图会话、冻结图、编辑状态和截图窗口资源收进同一个生命周期边界，并以 `Preparing`、`Selecting`、`Editing` 表示阶段。`handler.rs` 中的 `ApplicationHandler<App>` 只按窗口种类路由；属于截图窗口的原始 `WindowEvent` 由截图操作解释，并返回复制、OCR、贴图、关闭或故障等高层命令供 `App` 执行。平台调用尚未完全收口：捕获编排仍使用 xcap、winit 和 softbuffer，剪贴板直接调用 Win32，OCR 编排直接启动子进程并在回退路径调用 WinRT OCR。
+当前用 `Option<CaptureOperation>` 把截图会话、冻结图、编辑状态和截图窗口资源收进同一个生命周期边界。同步捕获尝试只有全部成功才产生截图操作，不把半初始化状态存入 `App`。`handler.rs` 中的 `ApplicationHandler<App>` 只按窗口种类路由；属于截图窗口的原始 `WindowEvent` 由截图操作解释，并返回复制、OCR、贴图、关闭或故障等高层命令供 `App` 执行。捕获平台调用位于私有 attempt module，剪贴板仍直接调用 Win32；文字识别通过一个 interface 隐藏双后端选择、worker 进程角色、回退与排版实现。
 
 ### 4.3 职责与当前代码映射
 
@@ -727,8 +727,9 @@ flowchart LR
 | 渲染与图像合成 | 遮罩、选框、工具栏、标注显示、输出图合成和像素转换 | `src/app/render.rs` |
 | 贴图集合 | 独占 0～8 张贴图；窗口创建、容量预留、插入后显示、截图显隐、原始事件解释、拖动、双击、重绘故障移除和资源释放 | `src/app/pinned/` |
 | 剪贴板与临时文件 | `CF_DIB`、`CF_HDROP`、`CF_UNICODETEXT`、HGLOBAL、唯一 PNG 和安全清理 | `src/app/clipboard.rs` |
-| OCR 编排与排版 | 原始选区准备、4096/800 万输入预算、默认 worker 调用、区域坐标合并、项目符号/成对引号归一、基于原图空白证据的混排间距，以及 Windows OCR 回退和语言分支；只返回文字 | `src/app/ocr.rs` |
-| OCR worker | 版本化 stdin/stdout 协议、运行时校验/原子提取/动态加载、嵌入式 PP-OCRv6 small-det/medium-rec 推理、8 MiB/64 KiB 管道上限、20 秒终止回收、kill-on-close Job Object 和主进程启动/等待逻辑 | `src/app/ocr_worker.rs` |
+| 文字识别深 module | 外部 interface 只接收冻结图与选区并返回文字、实际后端、回退原因或稳定失败；内部拥有输入预算、双 adapter 回退、区域合并、混排间距和进程角色入口 | `src/app/ocr/mod.rs` |
+| OCR 识别实现 | 原始输入准备、Windows OCR adapter、版面重建与结果归一；实现对 `App` 不可见 | `src/app/ocr/engine.rs` |
+| PP-OCR worker adapter | 版本化 stdin/stdout 协议、运行时校验/原子提取/动态加载、嵌入式 PP-OCRv6 small-det/medium-rec 推理、8 MiB/64 KiB 管道上限、20 秒终止回收和 kill-on-close Job Object | `src/app/ocr/worker.rs` |
 | OCR 制品构建 | 从 `RSHOT_OCR_MODEL_DIR`、`OAR_HOME` 或本机缓存准备三份 OCR 制品；`RSHOT_OCR_RUNTIME_DIR` 接受已经解压的官方 ONNX Runtime DLL 目录，未指定时才下载 Windows x64 CPU ZIP；全部校验大小与 SHA-256 后向编译器提供嵌入路径 | `build.rs` |
 | Windows 辅助 | HWND、DPI、DWM、窗口枚举、无激活显隐、GDI 文字、消息框、WinRT 和托盘图标 | `src/app/windows_adapter.rs` |
 | 捕获诊断 | 固定错误码日志、字段白名单和 64 KiB 上限 | `src/app/diagnostics.rs` |
@@ -1154,8 +1155,8 @@ flowchart TB
         Render["渲染与图像合成<br/>[Component]<br/>render.rs"]
         Pins["贴图集合<br/>[Component]<br/>pinned/"]
         Clip["剪贴板输出与临时文件<br/>[Component]<br/>clipboard.rs"]
-        OCR["OCR 编排与回退<br/>[Component]<br/>ocr.rs"]
-        WorkerClient["worker 客户端<br/>[Component]<br/>ocr_worker.rs（主进程侧）"]
+        OCR["文字识别 interface 与回退<br/>[Component]<br/>ocr/mod.rs"]
+        WorkerClient["PP-OCR worker adapter<br/>[Component]<br/>ocr/worker.rs"]
         Win["Windows 辅助边界<br/>[Component]<br/>windows_adapter.rs"]
         Diag["捕获诊断<br/>[Component]<br/>diagnostics.rs"]
 

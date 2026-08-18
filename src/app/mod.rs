@@ -5,7 +5,6 @@ mod editor;
 mod geometry;
 mod handler;
 mod ocr;
-mod ocr_worker;
 mod pinned;
 mod render;
 mod state;
@@ -17,7 +16,6 @@ use diagnostics::*;
 use editor::*;
 use geometry::*;
 use ocr::*;
-use ocr_worker::*;
 use pinned::*;
 #[cfg(test)]
 use render::*;
@@ -26,17 +24,14 @@ use windows_adapter::*;
 
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use serde::{Deserialize, Serialize};
-use softbuffer::{Context, Surface};
 use std::error::Error;
-use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
-use winit::window::{Window, WindowAttributes, WindowId};
-use xcap::Monitor;
+use winit::window::WindowId;
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -92,115 +87,25 @@ impl App {
             .and_then(CaptureOperation::selection)
     }
 
-    fn begin_capture_attempt(&mut self) {
-        self.close_overlay();
-        self.capture_operation = Some(CaptureOperation::begin());
-    }
-
     /// 截图热键触发：截鼠标那块屏 + 弹全屏遮罩，进入框选
     fn open_overlay(&mut self, event_loop: &dyn ActiveEventLoop) {
-        // 每个热键事件都是全新的尝试；先清掉任何不完整的旧会话。
-        self.begin_capture_attempt();
-
-        // 1. 鼠标坐标（进程已 DPI aware，拿的是物理像素）
-        let Some(cursor) = cursor_position() else {
-            self.handle_capture_failure(CaptureFailureStage::ReadCursor);
-            return;
-        };
-
-        // 2. 分别定位截图后端和遮罩窗口使用的显示器。
-        let Ok(monitor) = Monitor::from_point(cursor.0, cursor.1) else {
-            self.handle_capture_failure(CaptureFailureStage::LocateCaptureMonitor);
-            return;
-        };
-        let (cx, cy) = cursor;
-        let target = event_loop.available_monitors().find_map(|monitor| {
-            let (Some(position), Some(mode)) = (monitor.position(), monitor.current_video_mode())
-            else {
-                return None;
-            };
-            let size = mode.size();
-            if cx >= position.x
-                && cy >= position.y
-                && cx < position.x + size.width as i32
-                && cy < position.y + size.height as i32
-            {
-                Some((monitor, (position.x, position.y)))
-            } else {
-                None
+        self.close_overlay();
+        match CaptureOperation::start(CaptureAttemptContext {
+            event_loop,
+            pins: &self.pins,
+        }) {
+            Ok(operation) => self.capture_operation = Some(operation),
+            Err(failure) => {
+                if self.diagnostics_enabled && !failure.detail().is_empty() {
+                    eprintln!(
+                        "event=capture_attempt_failure code={} detail={}",
+                        failure.stage().code(),
+                        failure.detail().replace(['\r', '\n'], " ")
+                    );
+                }
+                self.handle_capture_failure(failure.stage());
             }
-        });
-        let Some((target, origin)) = target else {
-            self.handle_capture_failure(CaptureFailureStage::MatchOverlayMonitor);
-            return;
-        };
-
-        // 3. 截鼠标所在屏：隐藏旧贴图后获取并保留一份原始 RGBA。
-        // 旧贴图在整个新会话期间保持隐藏，既不会进入截图，也不会盖住选择遮罩。
-        self.pins.hide_for_capture();
-        let img = match monitor.capture_image() {
-            Ok(img) => img,
-            Err(_) => {
-                self.handle_capture_failure(CaptureFailureStage::CaptureImage);
-                return;
-            }
-        };
-
-        // 4. 建全屏无边框窗口钉到已经匹配的显示器。
-        // 弹遮罩之前把所有可见窗口的矩形拍个快照（之后遮罩会盖住一切，就点不到底下窗口了）
-        let windows = visible_window_rects();
-
-        let window: Rc<dyn Window> = match event_loop.create_window(
-            WindowAttributes::default()
-                .with_fullscreen(Some(winit::monitor::Fullscreen::Borderless(Some(target)))),
-        ) {
-            Ok(window) => Rc::from(window),
-            Err(error) => {
-                self.handle_session_failure(SessionFailure::new(
-                    SessionFailureStage::CreateWindow,
-                    error,
-                ));
-                return;
-            }
-        };
-        let context = match Context::new(window.clone()) {
-            Ok(context) => context,
-            Err(error) => {
-                drop(window);
-                self.handle_session_failure(SessionFailure::new(
-                    SessionFailureStage::CreateContext,
-                    error,
-                ));
-                return;
-            }
-        };
-        let surface = match Surface::new(&context, window.clone()) {
-            Ok(surface) => surface,
-            Err(error) => {
-                drop(context);
-                drop(window);
-                self.handle_session_failure(SessionFailure::new(
-                    SessionFailureStage::CreateSurface,
-                    error,
-                ));
-                return;
-            }
-        };
-        #[allow(deprecated)]
-        window.set_ime_allowed(true); // 让遮罩窗口能接收输入法组合（拼音候选窗）
-        window.request_redraw(); // 主动要首帧，否则黑底白窗
-        let Some(operation) = self.capture_operation.take() else {
-            self.handle_capture_failure(CaptureFailureStage::CaptureImage);
-            return;
-        };
-        let captured = CapturedSession::new(
-            img,
-            Box::new(LiveCaptureWindow::new(window, surface)),
-            cursor,
-            origin,
-            windows,
-        );
-        self.capture_operation = Some(operation.attach_capture(captured));
+        }
     }
 
     /// 确认截图：至少一种图片格式写入成功才结束会话；全部失败则恢复编辑界面。
@@ -245,7 +150,10 @@ impl App {
         operation.set_window_visible(false);
         let (result, clipboard_owner) = match operation.ocr_source() {
             Ok(source) => (
-                recognize_image_text(source.frozen_image, source.selection),
+                recognize(OcrRequest {
+                    frozen_image: source.frozen_image,
+                    selection: source.selection,
+                }),
                 Some(source.owner),
             ),
             Err(_) => {
@@ -312,6 +220,13 @@ impl App {
                 }
             }
             Err(error) => {
+                if self.diagnostics_enabled {
+                    eprintln!(
+                        "event=ocr_failed model_stage={:?} final_stage={:?}",
+                        error.model_stage(),
+                        error.stage()
+                    );
+                }
                 show_message(&format!("文字识别失败：\n{error}"), true);
                 if let Some(operation) = &self.capture_operation {
                     operation.set_window_visible(true);
@@ -352,37 +267,25 @@ impl App {
         let Some(operation) = self.capture_operation.take() else {
             return;
         };
-        let out = match operation.commit_pin(plan) {
-            Ok(image) => image,
+        let mut commit = match operation.commit_pin(plan) {
+            Ok(commit) => commit,
             Err((operation, _)) => {
                 self.capture_operation = Some(operation);
                 return;
             }
         };
-        prepared.commit(out);
+        prepared.commit(commit.take_image());
+        drop(commit);
     }
 }
 impl App {
-    fn take_capture_failure_notice(&mut self, stage: CaptureFailureStage) -> Option<String> {
-        if !self
-            .capture_operation
-            .as_ref()
-            .is_some_and(CaptureOperation::is_preparing)
-        {
-            return None;
-        }
-        let Some(operation) = self.capture_operation.take() else {
-            return None;
-        };
-        let CaptureEnd::CaptureFailed(stage) = operation.capture_failed(stage);
+    fn capture_failure_notice(&mut self, stage: CaptureFailureStage) -> String {
         self.close_overlay();
-        Some(format!("无法开始截图，请重试。\n错误码：{}", stage.code()))
+        format!("无法开始截图，请重试。\n错误码：{}", stage.code())
     }
 
     fn handle_capture_failure(&mut self, stage: CaptureFailureStage) {
-        let Some(message) = self.take_capture_failure_notice(stage) else {
-            return;
-        };
+        let message = self.capture_failure_notice(stage);
         if self.diagnostics_enabled && record_capture_failure(stage).is_err() {
             // 诊断失败本身不能阻止恢复；这里只输出固定字段，不泄露路径或系统错误文本。
             eprintln!(
@@ -436,21 +339,19 @@ impl App {
         if let Some(operation) = self.capture_operation.take() {
             operation.close();
         }
-        self.pins.restore_after_capture();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Annotation, App, CaptureFailureStage, CaptureOperation, CapturePhase, Config, OcrBackend,
-        OcrCharacterData, OcrFallbackReason, OcrLineData, OcrRegionData, OcrWordData, PALETTE,
-        PublishedImageFormats, SessionFailure, SessionFailureStage, Shape,
-        TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE, TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR,
-        TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image, build_about_message,
-        build_dib, capture_failure_log_line, choose_ocr_backend, claim_temp_cleanup_slot,
-        cleanup_expired_temp_pngs_in, color_u32, crop_image, draw_annotation_image,
-        draw_line_image, draw_rect_image, embedded_character_count, gdi_text_size,
+        Annotation, App, CaptureFailureStage, CaptureOperation, CapturePhase, Config,
+        OcrCharacterData, OcrLineData, OcrRegionData, OcrWordData, PALETTE, PublishedImageFormats,
+        SessionFailure, SessionFailureStage, Shape, TEMP_PNG_CLEANUP_INTERVAL, TEMP_PNG_MAX_AGE,
+        TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem,
+        blit_rgba_image, build_about_message, build_dib, capture_failure_log_line,
+        claim_temp_cleanup_slot, cleanup_expired_temp_pngs_in, color_u32, crop_image,
+        draw_annotation_image, draw_line_image, draw_rect_image, gdi_text_size,
         image_clipboard_publish_succeeded, is_cjk_language_tag, is_managed_temp_png,
         normalized_rect, ocr_region, palette_hit, palette_popup_rect, palette_swatch_rect,
         prepare_ocr_rgba, prepare_ocr_rgba_for_recognition, prepare_ocr_worker_rgba,
@@ -470,52 +371,7 @@ mod tests {
     static TEST_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn install_test_capture(app: &mut App, image: RgbaImage) {
-        app.capture_operation =
-            Some(CaptureOperation::begin().capture_succeeded_without_window(image));
-    }
-
-    #[test]
-    fn embedded_ppocrv6_dictionary_matches_the_recognition_model() {
-        assert_eq!(embedded_character_count(), 18_708);
-    }
-
-    #[test]
-    fn ocr_backend_reports_model_success_without_calling_fallback() {
-        let result = choose_ocr_backend(Ok(String::from("  text  ")), || {
-            panic!("Windows OCR should not run after model success")
-        })
-        .unwrap();
-        assert_eq!(result.text, "text");
-        assert_eq!(result.backend, OcrBackend::PpOcrV6);
-        assert_eq!(result.fallback_reason, None);
-    }
-
-    #[test]
-    fn ocr_backend_explicitly_reports_windows_fallback() {
-        let result = choose_ocr_backend(Err(String::from("model unavailable")), || {
-            Ok(String::from("fallback text"))
-        })
-        .unwrap();
-        assert_eq!(result.text, "fallback text");
-        assert_eq!(result.backend, OcrBackend::Windows);
-        assert_eq!(
-            result.fallback_reason,
-            Some(OcrFallbackReason::ModelUnavailable)
-        );
-
-        let empty_model =
-            choose_ocr_backend(Ok(String::new()), || Ok(String::from("fallback text"))).unwrap();
-        assert_eq!(
-            empty_model.fallback_reason,
-            Some(OcrFallbackReason::ModelReturnedNoText)
-        );
-
-        let error = choose_ocr_backend(Err(String::from("model unavailable")), || {
-            Err(String::from("language pack unavailable"))
-        })
-        .unwrap_err();
-        assert!(error.contains("model unavailable"));
-        assert!(error.contains("language pack unavailable"));
+        app.capture_operation = Some(CaptureOperation::ready_without_window(image));
     }
 
     #[test]
@@ -1357,6 +1213,10 @@ mod tests {
             (CaptureFailureStage::LocateCaptureMonitor, "RSH-CAP-002"),
             (CaptureFailureStage::MatchOverlayMonitor, "RSH-CAP-003"),
             (CaptureFailureStage::CaptureImage, "RSH-CAP-004"),
+            (CaptureFailureStage::HidePins, "RSH-CAP-005"),
+            (CaptureFailureStage::CreateWindow, "RSH-CAP-006"),
+            (CaptureFailureStage::CreateContext, "RSH-CAP-007"),
+            (CaptureFailureStage::CreateSurface, "RSH-CAP-008"),
         ];
         for (stage, code) in stages {
             assert_eq!(stage.code(), code);
@@ -1402,22 +1262,11 @@ mod tests {
     fn successful_capture_transition_finishes_the_entry_attempt() {
         let mut app = App::default();
 
-        app.begin_capture_attempt();
-        assert_eq!(
-            app.capture_operation.as_ref().map(CaptureOperation::phase),
-            Some(CapturePhase::Preparing)
-        );
-        let operation = app.capture_operation.take().unwrap();
-        app.capture_operation =
-            Some(operation.capture_succeeded_without_window(RgbaImage::new(2, 2)));
+        install_test_capture(&mut app, RgbaImage::new(2, 2));
 
         assert_eq!(
             app.capture_operation.as_ref().map(CaptureOperation::phase),
             Some(CapturePhase::Selecting)
-        );
-        assert!(
-            app.take_capture_failure_notice(CaptureFailureStage::CaptureImage)
-                .is_none()
         );
     }
 
@@ -1439,14 +1288,7 @@ mod tests {
                 .unwrap()
                 .seed_editing_text_for_test("private annotation", "secret text");
 
-            app.begin_capture_attempt();
-            assert_eq!(
-                app.capture_operation.as_ref().map(CaptureOperation::phase),
-                Some(CapturePhase::Preparing)
-            );
-            assert!(app.selection().is_none());
-
-            let notice = app.take_capture_failure_notice(stage).unwrap();
+            let notice = app.capture_failure_notice(stage);
             assert!(notice.contains(stage.code()));
             assert!(!notice.contains("secret text"));
             assert!(!notice.contains("private annotation"));
@@ -1454,9 +1296,6 @@ mod tests {
             assert!(app.selection().is_none());
             assert_eq!(app.shot_id, 41);
             assert_eq!(app.quit_id, 42);
-
-            // 同一次尝试的重复失败不重复提示；下一轮 begin 后会再次提示。
-            assert!(app.take_capture_failure_notice(stage).is_none());
         }
     }
 
@@ -1594,19 +1433,13 @@ mod tests {
 }
 
 pub(super) fn entry() {
-    if is_ocr_self_test_invocation() {
-        if let Err(error) = run_ocr_self_test() {
+    match try_run_process_role() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
-        return;
-    }
-    if is_ocr_worker_invocation() {
-        if let Err(error) = run_ocr_worker() {
-            eprintln!("{error}");
-            std::process::exit(2);
-        }
-        return;
     }
     // release 版没控制台，启动出错会闷声退出；这里把错误弹窗告诉用户
     if let Err(error) = run() {

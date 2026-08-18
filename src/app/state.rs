@@ -5,7 +5,11 @@ pub(super) enum CaptureFailureStage {
     ReadCursor,
     LocateCaptureMonitor,
     MatchOverlayMonitor,
+    HidePins,
     CaptureImage,
+    CreateWindow,
+    CreateContext,
+    CreateSurface,
 }
 
 impl CaptureFailureStage {
@@ -14,16 +18,17 @@ impl CaptureFailureStage {
             Self::ReadCursor => "RSH-CAP-001",
             Self::LocateCaptureMonitor => "RSH-CAP-002",
             Self::MatchOverlayMonitor => "RSH-CAP-003",
+            Self::HidePins => "RSH-CAP-005",
             Self::CaptureImage => "RSH-CAP-004",
+            Self::CreateWindow => "RSH-CAP-006",
+            Self::CreateContext => "RSH-CAP-007",
+            Self::CreateSurface => "RSH-CAP-008",
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SessionFailureStage {
-    CreateWindow,
-    CreateContext,
-    CreateSurface,
     AccessSurface,
     ResizeSurface,
     AcquireBuffer,
@@ -33,9 +38,6 @@ pub(super) enum SessionFailureStage {
 impl SessionFailureStage {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::CreateWindow => "创建截图窗口",
-            Self::CreateContext => "创建图形上下文",
-            Self::CreateSurface => "创建绘图表面",
             Self::AccessSurface => "访问绘图表面",
             Self::ResizeSurface => "调整绘图表面尺寸",
             Self::AcquireBuffer => "获取绘图缓冲区",

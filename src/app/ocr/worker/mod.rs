@@ -1,4 +1,4 @@
-use super::ocr::{
+use super::engine::{
     OcrCharacterData, OcrRegionData, prepare_ocr_worker_rgba, rebuild_model_ocr_text,
     restore_model_cross_region_spacing, restore_model_region_spacing,
 };
@@ -80,7 +80,7 @@ static ORT_RUNTIME: &[u8] = include_bytes!(env!("RSHOT_ORT_DLL"));
 static ORT_PROVIDERS: &[u8] = include_bytes!(env!("RSHOT_ORT_PROVIDERS_DLL"));
 
 #[cfg(test)]
-pub(super) fn embedded_character_count() -> usize {
+pub(in crate::app) fn embedded_character_count() -> usize {
     CHARACTER_DICTIONARY.lines().count()
 }
 
@@ -489,7 +489,7 @@ pub(super) fn recognize_with_worker(
 }
 
 #[cfg(test)]
-pub(super) fn worker_protocol_round_trip(
+pub(in crate::app) fn worker_protocol_round_trip(
     rgba: &[u8],
     width: u32,
     height: u32,
@@ -497,4 +497,12 @@ pub(super) fn worker_protocol_round_trip(
     let mut request = Vec::new();
     write_request(&mut request, rgba, width, height)?;
     read_request(request.as_slice())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn embedded_dictionary_matches_the_recognition_model() {
+        assert_eq!(super::embedded_character_count(), 18_708);
+    }
 }

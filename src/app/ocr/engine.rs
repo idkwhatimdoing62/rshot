@@ -1,4 +1,4 @@
-use super::geometry::normalized_rect;
+use crate::app::geometry::normalized_rect;
 use std::borrow::Cow;
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
@@ -12,59 +12,59 @@ const MODEL_OCR_MAX_DIMENSION: u32 = 4096;
 const MODEL_OCR_PIXEL_BUDGET: u64 = 8_000_000;
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct OcrWordData {
-    pub(super) text: String,
-    pub(super) x: f32,
-    pub(super) y: f32,
-    pub(super) width: f32,
-    pub(super) height: f32,
+pub(in crate::app) struct OcrWordData {
+    pub(in crate::app) text: String,
+    pub(in crate::app) x: f32,
+    pub(in crate::app) y: f32,
+    pub(in crate::app) width: f32,
+    pub(in crate::app) height: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct OcrLineData {
-    pub(super) words: Vec<OcrWordData>,
+pub(in crate::app) struct OcrLineData {
+    pub(in crate::app) words: Vec<OcrWordData>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct OcrRegionData {
-    pub(super) text: String,
-    pub(super) x: f32,
-    pub(super) y: f32,
-    pub(super) width: f32,
-    pub(super) height: f32,
-    pub(super) space_before: bool,
+pub(in crate::app) struct OcrRegionData {
+    pub(in crate::app) text: String,
+    pub(in crate::app) x: f32,
+    pub(in crate::app) y: f32,
+    pub(in crate::app) width: f32,
+    pub(in crate::app) height: f32,
+    pub(in crate::app) space_before: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct OcrCharacterData {
-    pub(super) ch: char,
-    pub(super) x: f32,
-    pub(super) y: f32,
-    pub(super) width: f32,
-    pub(super) height: f32,
+pub(in crate::app) struct OcrCharacterData {
+    pub(in crate::app) ch: char,
+    pub(in crate::app) x: f32,
+    pub(in crate::app) y: f32,
+    pub(in crate::app) width: f32,
+    pub(in crate::app) height: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum OcrBackend {
+pub(in crate::app) enum OcrBackend {
     PpOcrV6,
     Windows,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum OcrFallbackReason {
+pub(in crate::app) enum OcrFallbackReason {
     ModelReturnedNoText,
     ModelUnavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct OcrRecognition {
-    pub(super) text: String,
-    pub(super) backend: OcrBackend,
-    pub(super) fallback_reason: Option<OcrFallbackReason>,
+pub(in crate::app) struct OcrRecognition {
+    pub(in crate::app) text: String,
+    pub(in crate::app) backend: OcrBackend,
+    pub(in crate::app) fallback_reason: Option<OcrFallbackReason>,
 }
 
 /// 计算 OCR 使用的原图区域。返回 left / top / width / height，全部限制在图片内。
-pub(super) fn ocr_region(
+pub(in crate::app) fn ocr_region(
     img: &RgbaImage,
     sel: Option<((i32, i32), (i32, i32))>,
 ) -> Option<(u32, u32, u32, u32)> {
@@ -83,7 +83,7 @@ pub(super) fn ocr_region(
 }
 
 /// 从原始截图提取 OCR 输入，并在超过系统上限时等比缩小。这样不会识别用户画的标注。
-pub(super) fn prepare_ocr_rgba<'a>(
+pub(in crate::app) fn prepare_ocr_rgba<'a>(
     img: &'a RgbaImage,
     sel: Option<((i32, i32), (i32, i32))>,
     max_dimension: u32,
@@ -124,7 +124,7 @@ pub(super) fn prepare_ocr_rgba<'a>(
 
 /// 小尺寸文本截图先放大 2 倍；实测能显著减少简体中文和标点误识别。
 /// 大图保持原样，超过系统上限时仍按比例缩小，避免无界增加 OCR 峰值内存。
-pub(super) fn prepare_ocr_rgba_for_recognition<'a>(
+pub(in crate::app) fn prepare_ocr_rgba_for_recognition<'a>(
     img: &'a RgbaImage,
     sel: Option<((i32, i32), (i32, i32))>,
     max_dimension: u32,
@@ -160,7 +160,7 @@ pub(super) fn prepare_ocr_rgba_for_recognition<'a>(
 
 /// 为内置模型准备原始选区。PP-OCR 自带尺寸归一化，因此这里只在输入过大时
 /// 等比缩小，不再先做会损伤灰底代码片段的二值化或锐化。
-pub(super) fn prepare_ocr_worker_rgba(
+pub(in crate::app) fn prepare_ocr_worker_rgba(
     img: &RgbaImage,
     sel: Option<((i32, i32), (i32, i32))>,
 ) -> Option<(Vec<u8>, u32, u32)> {
@@ -327,7 +327,7 @@ fn same_word_row(group: &[OcrWordData], word: &OcrWordData) -> bool {
 
 /// Windows OCR 有时会把同一视觉行的灰底代码片段拆成多条并乱序返回。
 /// 这里把所有词按物理坐标重新聚类，超大横向间隔仍拆开，避免误合并双栏内容。
-pub(super) fn regroup_ocr_lines(lines: &[OcrLineData]) -> Vec<OcrLineData> {
+pub(in crate::app) fn regroup_ocr_lines(lines: &[OcrLineData]) -> Vec<OcrLineData> {
     let mut words: Vec<OcrWordData> = lines
         .iter()
         .flat_map(|line| line.words.iter())
@@ -494,7 +494,7 @@ fn needs_space(
     !(left_cjk_or_digit && right_cjk_or_digit)
 }
 
-pub(super) fn rebuild_ocr_text(lines: &[OcrLineData]) -> String {
+pub(in crate::app) fn rebuild_ocr_text(lines: &[OcrLineData]) -> String {
     let mut output = Vec::with_capacity(lines.len());
     for line in lines {
         let words: Vec<&OcrWordData> = line
@@ -807,7 +807,7 @@ fn model_boundary_has_visual_space(
     false
 }
 
-pub(super) fn restore_model_region_spacing(
+pub(in crate::app) fn restore_model_region_spacing(
     text: &str,
     characters: &[OcrCharacterData],
     image: &RgbImage,
@@ -915,7 +915,7 @@ fn same_indexed_region_row(regions: &[OcrRegionData], group: &[usize], candidate
 
 /// 检测器可能把同一视觉行切成多个区域。跨区域也必须使用首尾字符框和原图
 /// 空白作为证据，不能用检测框 padding 或字符类别猜空格。
-pub(super) fn restore_model_cross_region_spacing(
+pub(in crate::app) fn restore_model_cross_region_spacing(
     regions: &mut [OcrRegionData],
     characters: &[Vec<OcrCharacterData>],
     image: &RgbImage,
@@ -978,7 +978,7 @@ pub(super) fn restore_model_cross_region_spacing(
 
 /// PP-OCR 检测阶段会把同一视觉行里的多个灰底代码片段分别返回。按坐标合并
 /// 同行区域，随后只归一项目符号、成对引号和已由原图验证的空格，不猜正文。
-pub(super) fn rebuild_model_ocr_text(regions: &[OcrRegionData]) -> String {
+pub(in crate::app) fn rebuild_model_ocr_text(regions: &[OcrRegionData]) -> String {
     let mut regions: Vec<OcrRegionData> = regions
         .iter()
         .filter(|region| {
@@ -1041,7 +1041,7 @@ pub(super) fn rebuild_model_ocr_text(regions: &[OcrRegionData]) -> String {
     output.join("\r\n")
 }
 
-pub(super) fn is_cjk_language_tag(tag: &str) -> bool {
+pub(in crate::app) fn is_cjk_language_tag(tag: &str) -> bool {
     let language = tag
         .split(['-', '_'])
         .next()
@@ -1063,7 +1063,7 @@ fn user_profile_ocr_engine() -> Result<(OcrEngine, bool), String> {
 
 /// 调用系统自带的 Windows.Media.Ocr。中日韩识别结果按 Windows 返回的行、词和
 /// 几何间距重建，保留换行并去掉中文词间伪空格；其他语言保持系统原始排版。
-fn recognize_image_text_windows(
+pub(in crate::app) fn recognize_image_text_windows(
     img: &RgbaImage,
     sel: Option<((i32, i32), (i32, i32))>,
 ) -> Result<String, String> {
@@ -1143,44 +1143,4 @@ fn recognize_image_text_windows(
     Ok(rebuild_ocr_text(&regroup_ocr_lines(&lines))
         .trim()
         .to_owned())
-}
-
-pub(super) fn choose_ocr_backend(
-    model_result: Result<String, String>,
-    windows_ocr: impl FnOnce() -> Result<String, String>,
-) -> Result<OcrRecognition, String> {
-    let (model_error, fallback_reason) = match model_result {
-        Ok(text) if !text.trim().is_empty() => {
-            return Ok(OcrRecognition {
-                text: text.trim().to_owned(),
-                backend: OcrBackend::PpOcrV6,
-                fallback_reason: None,
-            });
-        }
-        Ok(_) => (
-            String::from("高精度 OCR 未识别到文字"),
-            OcrFallbackReason::ModelReturnedNoText,
-        ),
-        Err(error) => (error, OcrFallbackReason::ModelUnavailable),
-    };
-    windows_ocr()
-        .map(|text| OcrRecognition {
-            text,
-            backend: OcrBackend::Windows,
-            fallback_reason: Some(fallback_reason),
-        })
-        .map_err(|windows_error| {
-            format!("高精度 OCR：{model_error}\n系统 OCR 回退：{windows_error}")
-        })
-}
-
-/// 默认使用随程序发布的 PP-OCRv6 small-det/medium-rec。模型只在一次性子进程中加载，识别
-/// 完成后立即释放；子进程不可用或没有结果时回退到 Windows.Media.Ocr。
-pub(super) fn recognize_image_text(
-    img: &RgbaImage,
-    sel: Option<((i32, i32), (i32, i32))>,
-) -> Result<OcrRecognition, String> {
-    choose_ocr_backend(super::ocr_worker::recognize_with_worker(img, sel), || {
-        recognize_image_text_windows(img, sel)
-    })
 }
