@@ -1,0 +1,43 @@
+name: Change proposal
+description: Track a behavior, architecture, or release change through completion
+title: ""
+labels:
+  - needs-triage
+body:
+  - type: textarea
+    id: why
+    attributes:
+      label: Why now
+      description: What problem exists, who it affects, and why it should be changed now.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and boundaries
+      description: State what is included, excluded, and which Owner Docs may change.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable, checkable outcomes.
+      placeholder: "- [ ] ..."
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and decisions
+      description: Record known failure modes, open questions, and decisions that may require an ADR.
+  - type: textarea
+    id: discoveries
+    attributes:
+      label: Discoveries during implementation
+      description: Keep findings and scope changes here instead of only in chat.
+  - type: textarea
+    id: remaining
+    attributes:
+      label: Remaining work
+      description: Link follow-up Issues for anything intentionally left unfinished.

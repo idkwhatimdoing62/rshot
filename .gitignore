@@ -3,5 +3,8 @@
 /.gitignore
 /claude
 /docs/*
+!/docs/WORKFLOW.md
+!/docs/adr/
+!/docs/adr/*.md
 !/docs/agents/
 !/docs/release/
