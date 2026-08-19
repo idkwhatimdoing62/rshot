@@ -79,6 +79,9 @@ struct App {
     about_message: String,
     diagnostics_enabled: bool,
     capture_operation: Option<CaptureOperation>,
+    ocr_operation: Option<OcrOperation>,
+    active_ocr_session: Option<OcrSessionId>,
+    next_ocr_session: u64,
 
     pins: PinCollection,
     clipboard: ClipboardPublisher,
@@ -193,28 +196,58 @@ impl App {
         }
     }
 
-    /// 识别当前原始选区中的文字并写入文字剪贴板。标注层不会参与 OCR。
+    /// 启动异步文字识别。工作线程拥有像素副本，事件线程只轮询结果。
     fn copy_ocr_text(&mut self) {
+        if self.ocr_operation.is_some() {
+            return;
+        }
         let Some(operation) = &mut self.capture_operation else {
             return;
         };
-        operation.set_window_visible(false);
-        let (result, clipboard_owner) = match operation.ocr_source() {
-            Ok(source) => (
-                recognize(OcrRequest {
+        let session_id = OcrSessionId(self.next_ocr_session);
+        self.next_ocr_session = self.next_ocr_session.wrapping_add(1);
+        let ocr = match operation.ocr_source() {
+            Ok(source) => match OcrOperation::start(
+                session_id,
+                Instant::now() + Duration::from_secs(30),
+                OcrRequest {
                     frozen_image: source.frozen_image,
                     selection: source.selection,
-                }),
-                Some(source.owner),
-            ),
+                },
+            ) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    show_message(&format!("无法启动文字识别：\n{error}"), true);
+                    operation.set_window_visible(true);
+                    operation.request_redraw();
+                    return;
+                }
+            },
             Err(_) => {
                 operation.set_window_visible(true);
                 operation.request_redraw();
                 return;
             }
         };
-        match result {
-            Ok(recognition) if recognition.text.is_empty() => {
+        operation.set_window_visible(false);
+        self.active_ocr_session = Some(session_id);
+        self.ocr_operation = Some(ocr);
+    }
+
+    fn poll_ocr_operation(&mut self, now: Instant) {
+        let Some(event) = self
+            .ocr_operation
+            .as_mut()
+            .and_then(|operation| operation.poll(now))
+        else {
+            return;
+        };
+        self.ocr_operation = None;
+        let Some(event) = self.take_current_ocr_event(event) else {
+            return;
+        };
+        match event {
+            OcrEvent::Completed { recognition, .. } if recognition.text.is_empty() => {
                 let backend_note = match recognition.fallback_reason {
                     Some(OcrFallbackReason::ModelReturnedNoText) => {
                         "\n高精度模型未识别到文字，已改用 Windows 系统 OCR。"
@@ -233,14 +266,16 @@ impl App {
                     operation.request_redraw();
                 }
             }
-            Ok(recognition)
-                if clipboard_owner.is_some_and(|owner| {
-                    self.clipboard
-                        .publish(
-                            ClipboardContent::Text(&recognition.text),
-                            ClipboardOwner::from_window(owner),
-                        )
-                        .succeeded()
+            OcrEvent::Completed { recognition, .. }
+                if self.capture_operation.as_mut().is_some_and(|operation| {
+                    operation.ocr_source().ok().is_some_and(|source| {
+                        self.clipboard
+                            .publish(
+                                ClipboardContent::Text(&recognition.text),
+                                ClipboardOwner::from_window(source.owner),
+                            )
+                            .succeeded()
+                    })
                 }) =>
             {
                 let fallback_reason = recognition.fallback_reason;
@@ -257,7 +292,7 @@ impl App {
                     None => {}
                 }
             }
-            Ok(recognition) => {
+            OcrEvent::Completed { recognition, .. } => {
                 let backend_note = match recognition.fallback_reason {
                     Some(OcrFallbackReason::ModelReturnedNoText) => {
                         "\n高精度模型未识别到文字，本次结果来自 Windows 系统 OCR。"
@@ -276,7 +311,7 @@ impl App {
                     operation.request_redraw();
                 }
             }
-            Err(error) => {
+            OcrEvent::Failed { failure: error, .. } => {
                 if self.diagnostics_enabled {
                     let _ = record_diagnostic(DiagnosticEvent::Ocr(error.stage()));
                     eprintln!(
@@ -291,6 +326,33 @@ impl App {
                     operation.request_redraw();
                 }
             }
+            OcrEvent::TimedOut { .. } => {
+                if self.diagnostics_enabled {
+                    let _ =
+                        record_diagnostic(DiagnosticEvent::Ocr(OcrFailureStage::OperationTimeout));
+                }
+                show_message(
+                    "文字识别超时，当前截图和标注已保留。\n\n可以缩小选区后重试。",
+                    true,
+                );
+                self.restore_capture_after_ocr();
+            }
+            OcrEvent::Cancelled { .. } => self.restore_capture_after_ocr(),
+        }
+    }
+
+    fn take_current_ocr_event(&mut self, event: OcrEvent) -> Option<OcrEvent> {
+        if self.active_ocr_session != Some(event.session_id()) {
+            return None;
+        }
+        self.active_ocr_session = None;
+        Some(event)
+    }
+
+    fn restore_capture_after_ocr(&self) {
+        if let Some(operation) = &self.capture_operation {
+            operation.set_window_visible(true);
+            operation.request_redraw();
         }
     }
     fn pin(&mut self, event_loop: &dyn ActiveEventLoop) {
@@ -392,6 +454,10 @@ impl App {
 
     /// 关掉活动截图窗口，回后台待命；已有贴图恢复显示且不被销毁。
     fn close_overlay(&mut self) {
+        if let Some(mut operation) = self.ocr_operation.take() {
+            let _ = operation.cancel();
+        }
+        self.active_ocr_session = None;
         if let Some(operation) = self.capture_operation.take() {
             operation.close();
         }
@@ -482,17 +548,17 @@ fn run() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, CaptureFailureStage, CaptureOperation, CapturePhase, Config, OcrCharacterData,
-        OcrLineData, OcrRegionData, OcrWordData, PALETTE, SessionFailure, SessionFailureStage,
-        TEXT_FONT_HEIGHT, TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem,
-        blit_rgba_image, build_about_message, capture_failure_log_line, color_u32, crop_image,
-        gdi_text_size, is_cjk_language_tag, normalized_rect, ocr_region, palette_hit,
-        palette_popup_rect, palette_swatch_rect, prepare_ocr_rgba,
-        prepare_ocr_rgba_for_recognition, prepare_ocr_worker_rgba, rebuild_model_ocr_text,
-        rebuild_ocr_text, record_capture_failure_in, regroup_ocr_lines,
-        restore_model_cross_region_spacing, restore_model_region_spacing, toolbar_hit,
-        toolbar_item, toolbar_item_rect, toolbar_item_slot, toolbar_origin, toolbar_size,
-        worker_protocol_round_trip,
+        App, CaptureFailureStage, CaptureOperation, CapturePhase, Config, OcrBackend,
+        OcrCharacterData, OcrEvent, OcrLineData, OcrRecognition, OcrRegionData, OcrSessionId,
+        OcrWordData, PALETTE, SessionFailure, SessionFailureStage, TEXT_FONT_HEIGHT,
+        TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image,
+        build_about_message, capture_failure_log_line, color_u32, crop_image, gdi_text_size,
+        is_cjk_language_tag, normalized_rect, ocr_region, palette_hit, palette_popup_rect,
+        palette_swatch_rect, prepare_ocr_rgba, prepare_ocr_rgba_for_recognition,
+        prepare_ocr_worker_rgba, rebuild_model_ocr_text, rebuild_ocr_text,
+        record_capture_failure_in, regroup_ocr_lines, restore_model_cross_region_spacing,
+        restore_model_region_spacing, toolbar_hit, toolbar_item, toolbar_item_rect,
+        toolbar_item_slot, toolbar_origin, toolbar_size, worker_protocol_round_trip,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1250,7 +1316,10 @@ mod tests {
         );
         assert_eq!(
             line,
-            "unix_seconds=123 version=0.3.0-rc.1 event=capture_failed code=RSH-CAP-004\n"
+            format!(
+                "unix_seconds=123 version={} event=capture_failed code=RSH-CAP-004\n",
+                env!("CARGO_PKG_VERSION")
+            )
         );
         assert!(!line.contains("cursor"));
         assert!(!line.contains("monitor"));
@@ -1379,6 +1448,25 @@ mod tests {
     fn session_failure_message_names_the_failed_stage() {
         let failure = SessionFailure::new(SessionFailureStage::Present, "device lost");
         assert_eq!(failure.to_string(), "提交绘制结果失败：device lost");
+    }
+
+    #[test]
+    fn stale_ocr_completion_cannot_finish_the_current_session() {
+        let mut app = App {
+            active_ocr_session: Some(OcrSessionId(12)),
+            ..App::default()
+        };
+        let stale = OcrEvent::Completed {
+            session_id: OcrSessionId(11),
+            recognition: OcrRecognition {
+                text: String::from("old text"),
+                backend: OcrBackend::PpOcrV6,
+                fallback_reason: None,
+            },
+        };
+
+        assert!(app.take_current_ocr_event(stale).is_none());
+        assert_eq!(app.active_ocr_session, Some(OcrSessionId(12)));
     }
 
     // Clipboard encoding and managed artifact lifecycle tests live beside their modules.

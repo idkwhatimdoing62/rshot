@@ -13,9 +13,12 @@ impl ApplicationHandler for App {
                 continue;
             }
             if ev.id == self.quit_id {
+                self.close_overlay();
                 event_loop.exit(); // 退出整个程序
-            } else if ev.id == self.shot_id && self.capture_operation.is_none() {
-                // 只限制活动截图会话；已有贴图不会阻止下一次截图。
+            } else if ev.id == self.shot_id
+                && (self.capture_operation.is_none() || self.ocr_operation.is_some())
+            {
+                // OCR 期间再次截图会取消旧操作并开始新会话；已有贴图不阻止截图。
                 self.open_overlay(event_loop);
             }
         }
@@ -26,12 +29,18 @@ impl ApplicationHandler for App {
             }
         }
         let now = Instant::now();
+        self.poll_ocr_operation(now);
         let capture_wakeup = self
             .capture_operation
             .as_mut()
             .and_then(|operation| operation.tick(now));
         // ponytail: 120ms 轮询一次热键。想零延迟得用 EventLoopProxy 唤醒，暂不需要
-        let hotkey_wakeup = now + Duration::from_millis(120);
+        let hotkey_wakeup = now
+            + if self.ocr_operation.is_some() {
+                Duration::from_millis(30)
+            } else {
+                Duration::from_millis(120)
+            };
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             capture_wakeup
                 .map(|capture| capture.min(hotkey_wakeup))

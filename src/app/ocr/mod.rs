@@ -1,12 +1,18 @@
 mod engine;
+mod operation;
 mod worker;
 
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 use xcap::image::RgbaImage;
 
 pub(super) use engine::{OcrBackend, OcrFallbackReason, OcrRecognition};
+pub(super) use operation::{OcrEvent, OcrOperation, OcrSessionId};
+
+const WINDOWS_OCR_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(super) struct OcrRequest<'a> {
     pub(super) frozen_image: &'a RgbaImage,
@@ -21,6 +27,8 @@ pub(super) enum OcrFailureStage {
     WindowsOcrUnavailable,
     WindowsRecognitionFailed,
     ReadResult,
+    WindowsTimeout,
+    OperationTimeout,
 }
 
 impl OcrFailureStage {
@@ -32,6 +40,8 @@ impl OcrFailureStage {
             Self::WindowsOcrUnavailable => "RSH-OCR-004",
             Self::WindowsRecognitionFailed => "RSH-OCR-005",
             Self::ReadResult => "RSH-OCR-006",
+            Self::WindowsTimeout => "RSH-OCR-007",
+            Self::OperationTimeout => "RSH-OCR-008",
         }
     }
 }
@@ -78,7 +88,21 @@ impl RecognitionAdapter for WorkerAdapter {
 
 impl RecognitionAdapter for WindowsAdapter {
     fn recognize(&self, request: &OcrRequest<'_>) -> Result<String, String> {
-        engine::recognize_image_text_windows(request.frozen_image, request.selection)
+        let image = request.frozen_image.clone();
+        let selection = request.selection;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name(String::from("rshot-windows-ocr"))
+            .spawn(move || {
+                let result = super::windows_adapter::WinRtApartment::initialize()
+                    .map_err(|error| format!("无法初始化系统 OCR 线程：{error}"))
+                    .and_then(|_apartment| engine::recognize_image_text_windows(&image, selection));
+                let _ = sender.send(result);
+            })
+            .map_err(|error| format!("无法启动系统 OCR 线程：{error}"))?;
+        receiver
+            .recv_timeout(WINDOWS_OCR_TIMEOUT)
+            .map_err(|_| String::from("系统 OCR 超时"))?
     }
 }
 
@@ -105,7 +129,9 @@ fn classify_model_failure(detail: &str) -> OcrFailureStage {
 }
 
 fn classify_windows_failure(detail: &str) -> OcrFailureStage {
-    if detail.contains("读取 OCR") || detail.contains("读取当前 OCR") {
+    if detail.contains("系统 OCR 超时") {
+        OcrFailureStage::WindowsTimeout
+    } else if detail.contains("读取 OCR") || detail.contains("读取当前 OCR") {
         OcrFailureStage::ReadResult
     } else if detail.contains("创建系统 OCR") || detail.contains("语言包") {
         OcrFailureStage::WindowsOcrUnavailable
