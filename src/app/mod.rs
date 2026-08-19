@@ -1316,7 +1316,10 @@ mod tests {
         );
         assert_eq!(
             line,
-            "unix_seconds=123 version=0.3.0-rc.1 event=capture_failed code=RSH-CAP-004\n"
+            format!(
+                "unix_seconds=123 version={} event=capture_failed code=RSH-CAP-004\n",
+                env!("CARGO_PKG_VERSION")
+            )
         );
         assert!(!line.contains("cursor"));
         assert!(!line.contains("monitor"));
