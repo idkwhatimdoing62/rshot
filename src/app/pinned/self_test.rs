@@ -57,6 +57,10 @@ impl PinWindow for RecordingWindow {
         Some((0, 0))
     }
 
+    fn is_under_cursor(&self) -> bool {
+        true
+    }
+
     fn redraw(&mut self, _image: &RgbaImage) -> Result<(), PinFailure> {
         Ok(())
     }
@@ -93,7 +97,7 @@ pub(in crate::app) fn run_pin_coexistence_self_test(
     );
     visible.set(true);
 
-    let mut lease = collection
+    let lease = collection
         .hide_for_capture()
         .map_err(|error| error.to_string())?;
     if visible.get() {
@@ -101,17 +105,20 @@ pub(in crate::app) fn run_pin_coexistence_self_test(
             "pin remained visible while capture pixels were read",
         ));
     }
-    lease.complete_capture();
-    if !visible.get() {
+    if visible.get() {
         return Err(String::from(
-            "pin was not restored after capture pixels were read",
+            "pin was restored before the screenshot session ended",
         ));
     }
 
     calls.borrow_mut().clear();
     during_ocr()?;
-    if !visible.get() || calls.borrow().contains(&"visible:false") {
+    if visible.get() || calls.borrow().contains(&"visible:true") {
         return Err(String::from("OCR changed pin visibility"));
+    }
+    drop(lease);
+    if !visible.get() {
+        return Err(String::from("pin was not restored after the session ended"));
     }
     Ok(())
 }

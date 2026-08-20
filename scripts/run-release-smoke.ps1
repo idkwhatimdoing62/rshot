@@ -11,7 +11,7 @@ Push-Location $projectRoot
 try {
     cargo test consecutive_capture_sessions_start_and_close_independently
     if ($LASTEXITCODE -ne 0) { throw 'Consecutive screenshot session smoke test failed.' }
-    cargo test completing_pixel_capture_restores_pins_before_the_session_continues
+    cargo test completing_pixel_capture_keeps_pins_hidden_until_the_session_lease_drops
     if ($LASTEXITCODE -ne 0) { throw 'Pin coexistence smoke test failed.' }
     cargo test model_failure_falls_back_once
     if ($LASTEXITCODE -ne 0) { throw 'OCR fallback smoke test failed.' }

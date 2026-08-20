@@ -1,6 +1,9 @@
 use super::{PinFailure, PinFailureStage};
 use crate::app::render::{blit_rgba_image, draw_pin_badge};
-use crate::app::windows_adapter::{cursor_position, set_window_visible_without_activation};
+use crate::app::windows_adapter::{
+    cursor_position, set_window_capture_excluded, set_window_visible_without_activation,
+    window_hwnd,
+};
 use softbuffer::{Context, Surface};
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -16,6 +19,8 @@ pub(super) trait PinWindow {
     fn outer_position(&self) -> Option<(i32, i32)>;
     fn set_outer_position(&self, position: (i32, i32));
     fn cursor_position(&self) -> Option<(i32, i32)>;
+    fn is_under_cursor(&self) -> bool;
+    fn set_capture_excluded(&self, _excluded: bool) {}
     fn redraw(&mut self, image: &RgbaImage) -> Result<(), PinFailure>;
     fn close(self: Box<Self>);
 }
@@ -103,6 +108,16 @@ impl PinWindow for LivePinWindow {
 
     fn cursor_position(&self) -> Option<(i32, i32)> {
         cursor_position()
+    }
+
+    fn is_under_cursor(&self) -> bool {
+        crate::app::windows_adapter::window_under_cursor()
+            .zip(window_hwnd(self.window.as_ref()))
+            .is_some_and(|(under_cursor, own)| under_cursor == own)
+    }
+
+    fn set_capture_excluded(&self, excluded: bool) {
+        let _ = set_window_capture_excluded(self.window.as_ref(), excluded);
     }
 
     fn redraw(&mut self, image: &RgbaImage) -> Result<(), PinFailure> {

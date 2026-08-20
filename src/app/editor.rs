@@ -38,6 +38,7 @@ pub(super) struct EditorState {
     pub(super) text_editing: bool,
     pub(super) ime_preedit: String,
     pub(super) cursor_visible: bool,
+    pub(super) caret_byte: usize,
 }
 
 impl Default for EditorState {
@@ -55,6 +56,7 @@ impl Default for EditorState {
             text_editing: false,
             ime_preedit: String::new(),
             cursor_visible: true,
+            caret_byte: 0,
         }
     }
 }
@@ -128,6 +130,74 @@ impl EditorState {
         self.text_editing = true;
         self.ime_preedit.clear();
         self.cursor_visible = true;
+        self.caret_byte = 0;
+    }
+
+    pub(super) fn insert_text(&mut self, value: &str) -> bool {
+        let caret = self.caret_byte;
+        let Some(Shape::Text(_, text)) = self.annotations.last_mut().map(|a| &mut a.shape) else {
+            return false;
+        };
+        text.insert_str(caret, value);
+        self.caret_byte += value.len();
+        true
+    }
+
+    pub(super) fn backspace(&mut self) -> bool {
+        if self.caret_byte == 0 {
+            return false;
+        }
+        let Some(Shape::Text(_, text)) = self.annotations.last_mut().map(|a| &mut a.shape) else {
+            return false;
+        };
+        let previous = text[..self.caret_byte]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        text.drain(previous..self.caret_byte);
+        self.caret_byte = previous;
+        true
+    }
+
+    pub(super) fn move_caret_left(&mut self) {
+        if let Some(Shape::Text(_, text)) = self.annotations.last().map(|a| &a.shape) {
+            self.caret_byte = text[..self.caret_byte]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+    }
+
+    pub(super) fn move_caret_right(&mut self) {
+        if let Some(Shape::Text(_, text)) = self.annotations.last().map(|a| &a.shape)
+            && self.caret_byte < text.len()
+        {
+            self.caret_byte += text[self.caret_byte..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(0);
+        }
+    }
+
+    pub(super) fn remove_before_caret_if_matches(&mut self, value: &str) -> bool {
+        let count = value.chars().count();
+        let Some(Shape::Text(_, text)) = self.annotations.last_mut().map(|a| &mut a.shape) else {
+            return false;
+        };
+        let start = text[..self.caret_byte]
+            .char_indices()
+            .rev()
+            .nth(count.saturating_sub(1))
+            .map_or(self.caret_byte, |(index, _)| index);
+        if &text[start..self.caret_byte] != value {
+            return false;
+        }
+        text.drain(start..self.caret_byte);
+        self.caret_byte = start;
+        true
     }
 
     pub(super) fn commit_text(&mut self) -> bool {
@@ -136,6 +206,7 @@ impl EditorState {
         }
         self.text_editing = false;
         self.ime_preedit.clear();
+        self.caret_byte = 0;
         if self
             .annotations
             .last()
@@ -152,6 +223,7 @@ impl EditorState {
         }
         self.text_editing = false;
         self.ime_preedit.clear();
+        self.caret_byte = 0;
         if self
             .annotations
             .last()
@@ -317,4 +389,41 @@ pub(super) fn palette_hit(
         let (x0, y0, x1, y1) = palette_swatch_rect(popup, i);
         p.0 >= x0 && p.0 < x1 && p.1 >= y0 && p.1 < y1
     })
+}
+
+#[cfg(test)]
+mod text_editing_tests {
+    use super::*;
+
+    #[test]
+    fn caret_moves_on_utf8_boundaries_and_edits_at_the_insertion_point() {
+        let mut editor = EditorState::default();
+        editor.start_text((0, 0));
+        assert!(editor.insert_text("中b"));
+        editor.move_caret_left();
+        assert!(editor.insert_text("A"));
+        assert!(editor.backspace());
+        assert!(editor.insert_text("文"));
+
+        let Shape::Text(_, text) = &editor.annotations[0].shape else {
+            panic!("text")
+        };
+        assert_eq!(text, "中文b");
+    }
+
+    #[test]
+    fn ime_preedit_deduplication_uses_text_before_the_caret() {
+        let mut editor = EditorState::default();
+        editor.start_text((0, 0));
+        assert!(editor.insert_text("中ni文"));
+        editor.move_caret_left();
+
+        assert!(editor.remove_before_caret_if_matches("ni"));
+        assert!(editor.insert_text("你"));
+
+        let Shape::Text(_, text) = &editor.annotations[0].shape else {
+            panic!("text")
+        };
+        assert_eq!(text, "中你文");
+    }
 }

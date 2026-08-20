@@ -14,7 +14,7 @@ The model worker was isolated in a child process, but the event thread synchrono
 
 ## Consequences
 
-The event loop and pins remain responsive, and cancelled or stale results have no side effects. OCR copies its source pixels. Windows OCR may continue briefly in an isolated thread after the receiver times out because the current adapter cannot force-cancel the WinRT call.
+The event loop and pin collection remain responsive, and cancelled or stale results have no side effects. Pin windows are intentionally hidden while the screenshot session remains active, including during OCR, as recorded by [ADR-0007](0007-session-scoped-pin-visibility.md). OCR copies its source pixels. Windows OCR may continue briefly in an isolated thread after the receiver times out because the current adapter cannot force-cancel the WinRT call.
 
 ## Alternatives
 

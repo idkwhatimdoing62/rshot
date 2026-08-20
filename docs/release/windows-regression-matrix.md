@@ -40,8 +40,8 @@
 
 | ID | Scenario | Expected | Status | Evidence / issue |
 | --- | --- | --- | --- | --- |
-| P-01 | Pin then start another capture | Existing pin is absent from frozen pixels and restored immediately afterward | | |
-| P-02 | Run OCR while pins exist | Pins remain visible during OCR processing | | |
+| P-01 | Pin then start another capture | Existing pin is absent from frozen pixels, stays hidden for the session, and returns when it ends | | |
+| P-02 | Run OCR while pins exist | Pins remain hidden until the screenshot session ends, then reappear | | |
 | P-03 | Drag, double-click, right-click and Escape | Drag moves; other close gestures remove only the target pin | | |
 | P-04 | Eight pins then create a ninth | Existing pins and active screenshot remain intact | | |
 
