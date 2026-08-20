@@ -512,15 +512,17 @@ pub(super) fn draw_text_edit_box(
     ann: &Annotation,
     preedit: &str,
     cursor_visible: bool,
+    caret_byte: usize,
 ) {
     const CARET_COLOR: u32 = 0x004C9AFF; // 亮蓝：在任何底色上都醒目
     if let Shape::Text(pos, text) = &ann.shape {
-        let full = format!("{text}{preedit}");
+        let (before, after) = text.split_at(caret_byte.min(text.len()));
+        let full = format!("{before}{preedit}{after}");
         let (tw, th) = gdi_text_size(&full);
         let (tw, th) = (tw.max(4), th.max(TEXT_FONT_HEIGHT));
         // 组合中的拼音：画在已提交文字后面，用浅色 + 下划线区分
         if !preedit.is_empty() {
-            let (tw0, _) = gdi_text_size(text);
+            let (tw0, _) = gdi_text_size(before);
             let lighter = [
                 ann.color[0] + (255 - ann.color[0]) / 2,
                 ann.color[1] + (255 - ann.color[1]) / 2,
@@ -538,9 +540,10 @@ pub(super) fn draw_text_edit_box(
                 0,
             );
         }
-        // 闪烁光标：3px 宽实心竖条，紧跟文字末尾
+        // 闪烁光标：3px 宽实心竖条，位于当前插入点。
         if cursor_visible {
-            let cx = pos.0 + tw;
+            let caret_prefix = format!("{before}{preedit}");
+            let cx = pos.0 + gdi_text_size(&caret_prefix).0;
             draw_line_buffer(
                 buf,
                 w,

@@ -100,6 +100,7 @@ pub(super) struct CapturedSession {
     cursor: (i32, i32),
     origin: (i32, i32),
     windows: Vec<RectI>,
+    pin_visibility: Option<crate::app::pinned::CaptureVisibilityLease>,
 }
 
 impl CapturedSession {
@@ -116,7 +117,16 @@ impl CapturedSession {
             cursor,
             origin,
             windows,
+            pin_visibility: None,
         }
+    }
+
+    pub(super) fn with_pin_visibility(
+        mut self,
+        visibility: crate::app::pinned::CaptureVisibilityLease,
+    ) -> Self {
+        self.pin_visibility = Some(visibility);
+        self
     }
 }
 
@@ -124,6 +134,7 @@ pub(super) struct CaptureSession {
     pub(super) window: Option<Box<dyn window::CaptureWindow>>,
     frozen_image: RgbaImage,
     interaction: Interaction,
+    _pin_visibility: Option<crate::app::pinned::CaptureVisibilityLease>,
 }
 
 impl CaptureOperation {
@@ -157,16 +168,19 @@ impl CaptureOperation {
 
     pub(super) fn attach_capture(self, captured: CapturedSession) -> Self {
         debug_assert!(matches!(self.state, CaptureState::Preparing));
+        let CapturedSession {
+            frozen_image,
+            window,
+            cursor,
+            origin,
+            windows,
+            pin_visibility,
+        } = captured;
+        let mut session = CaptureSession::new(frozen_image, cursor, origin, windows);
+        session.window = Some(window);
+        session._pin_visibility = pin_visibility;
         Self {
-            state: CaptureState::Session(Box::new(CaptureSession {
-                window: Some(captured.window),
-                ..CaptureSession::new(
-                    captured.frozen_image,
-                    captured.cursor,
-                    captured.origin,
-                    captured.windows,
-                )
-            })),
+            state: CaptureState::Session(Box::new(session)),
         }
     }
 
@@ -182,6 +196,23 @@ impl CaptureOperation {
 
     pub(super) fn ready_without_window(frozen_image: RgbaImage) -> Self {
         Self::begin().capture_succeeded_without_window(frozen_image)
+    }
+
+    #[cfg(test)]
+    pub(in crate::app) fn ready_with_pin_visibility_for_test(
+        frozen_image: RgbaImage,
+        visibility: crate::app::pinned::CaptureVisibilityLease,
+    ) -> Self {
+        Self::begin().attach_capture(
+            CapturedSession::new(
+                frozen_image,
+                Box::new(window::SelfTestCaptureWindow),
+                (0, 0),
+                (0, 0),
+                Vec::new(),
+            )
+            .with_pin_visibility(visibility),
+        )
     }
 
     #[cfg(test)]
@@ -207,6 +238,7 @@ impl CaptureOperation {
         session.interaction.finish_selection_gesture(false, None);
         if let Some(editor) = session.interaction.editor_mut() {
             editor.text_editing = true;
+            editor.caret_byte = text.len();
             editor.ime_preedit = preedit.to_owned();
             editor.annotations.push(Annotation {
                 shape: Shape::Text((1, 1), text.to_owned()),
@@ -423,6 +455,7 @@ impl CaptureSession {
             window: None,
             frozen_image,
             interaction,
+            _pin_visibility: None,
         }
     }
 

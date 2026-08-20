@@ -19,7 +19,8 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetCursorPos, GetWindowRect, IsIconic, IsWindowVisible, MB_ICONERROR,
-    MB_ICONINFORMATION, MessageBoxW, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow,
+    MB_ICONINFORMATION, MessageBoxW, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowDisplayAffinity,
+    ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WindowFromPoint,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -45,6 +46,19 @@ pub(super) fn set_window_visible_without_activation(window: &dyn Window, visible
     } else {
         window.set_visible(visible);
     }
+}
+
+pub(super) fn set_window_capture_excluded(
+    window: &dyn Window,
+    excluded: bool,
+) -> Result<(), String> {
+    let hwnd = window_hwnd(window).ok_or_else(|| String::from("window has no Win32 handle"))?;
+    let affinity = if excluded {
+        WDA_EXCLUDEFROMCAPTURE
+    } else {
+        WDA_NONE
+    };
+    unsafe { SetWindowDisplayAffinity(hwnd, affinity) }.map_err(|error| error.to_string())
 }
 
 pub(super) fn flush_window_compositor() {
@@ -96,7 +110,7 @@ pub(super) fn gdi_text_size(text: &str) -> (i32, i32) {
     if text.is_empty() {
         return (1, TEXT_FONT_HEIGHT);
     }
-    let mut wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
     unsafe {
         let hdc = CreateCompatibleDC(None);
         if hdc.is_invalid() {
@@ -134,7 +148,7 @@ pub(super) fn gdi_render_text_rgba(text: &str, color: [u8; 4]) -> Option<(i32, i
     if text.is_empty() {
         return None;
     }
-    let mut wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
     unsafe {
         let hdc = CreateCompatibleDC(None);
         if hdc.is_invalid() {
@@ -266,6 +280,12 @@ pub(super) fn cursor_position() -> Option<(i32, i32)> {
     Some((point.x, point.y))
 }
 
+pub(super) fn window_under_cursor() -> Option<HWND> {
+    let (x, y) = cursor_position()?;
+    let hwnd = unsafe { WindowFromPoint(POINT { x, y }) };
+    (!hwnd.is_invalid()).then_some(hwnd)
+}
+
 pub(super) fn enable_per_monitor_dpi() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -316,5 +336,17 @@ pub(super) fn show_message(message: &str, error: bool) {
                 MB_ICONINFORMATION
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod text_metric_tests {
+    use super::*;
+
+    #[test]
+    fn chinese_prefix_width_does_not_include_a_phantom_terminator_glyph() {
+        let one = gdi_text_size("你").0;
+        let two = gdi_text_size("你好").0;
+        assert_eq!(one * 2, two);
     }
 }

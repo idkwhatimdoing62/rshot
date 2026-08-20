@@ -163,7 +163,8 @@ impl Interaction {
         let Shape::Text((x, y), text) = &annotation.shape else {
             return;
         };
-        let full = format!("{text}{}", editor.ime_preedit);
+        let before_caret = &text[..editor.caret_byte];
+        let full = format!("{before_caret}{}", editor.ime_preedit);
         let (width, _) = self.metrics.measure(&full);
         self.ime_requested = Some(ImeCursorArea {
             x: x + width,

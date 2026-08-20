@@ -157,6 +157,11 @@ pub(super) struct PreparedPin {
 }
 
 impl PinCollection {
+    #[cfg(test)]
+    fn test_capture_hidden(&self) -> bool {
+        self.state.borrow().capture_hidden
+    }
+
     pub(super) fn prepare(
         &self,
         event_loop: &dyn ActiveEventLoop,
@@ -212,7 +217,13 @@ impl PinCollection {
                 if event.state == ElementState::Pressed
                     && matches!(event.logical_key, Key::Named(NamedKey::Escape)) =>
             {
-                Self::close_in(&mut state, id);
+                if state
+                    .windows
+                    .get(&id)
+                    .is_some_and(|pin| pin.window.is_under_cursor())
+                {
+                    Self::close_in(&mut state, id);
+                }
             }
             WindowEvent::PointerMoved { .. } => {
                 let pin = state.windows.get_mut(&id).expect("owned pin");
@@ -280,6 +291,7 @@ impl PinCollection {
         }
         state.capture_hidden = true;
         for pin in state.windows.values_mut() {
+            pin.window.set_capture_excluded(true);
             pin.interaction.cancel();
             pin.window.set_visible(false);
         }
@@ -298,6 +310,7 @@ impl PinCollection {
         }
         state.capture_hidden = false;
         for pin in state.windows.values() {
+            pin.window.set_capture_excluded(false);
             pin.window.set_visible(true);
             pin.window.request_redraw();
         }
@@ -411,6 +424,7 @@ mod tests {
         cursor: Rc<Cell<Option<(i32, i32)>>>,
         position: Rc<Cell<(i32, i32)>>,
         redraw_failure: Cell<Option<PinFailureStage>>,
+        under_cursor: Rc<Cell<bool>>,
     }
 
     struct FailingFactory;
@@ -436,6 +450,7 @@ mod tests {
                 cursor: Rc::new(Cell::new(Some((100, 80)))),
                 position: Rc::new(Cell::new((400, 300))),
                 redraw_failure: Cell::new(None),
+                under_cursor: Rc::new(Cell::new(true)),
             }
         }
     }
@@ -467,6 +482,12 @@ mod tests {
         fn cursor_position(&self) -> Option<(i32, i32)> {
             self.cursor.get()
         }
+
+        fn is_under_cursor(&self) -> bool {
+            self.under_cursor.get()
+        }
+
+        fn set_capture_excluded(&self, _excluded: bool) {}
 
         fn redraw(&mut self, _image: &RgbaImage) -> Result<(), PinFailure> {
             self.calls.borrow_mut().push(String::from("redraw"));
@@ -662,16 +683,48 @@ mod tests {
     }
 
     #[test]
-    fn completing_pixel_capture_restores_pins_before_the_session_continues() {
+    fn completing_pixel_capture_keeps_pins_hidden_until_the_session_lease_drops() {
         let calls = Rc::new(RefCell::new(Vec::new()));
         let collection = collection(calls.clone());
         commit_window(&collection, 1, calls.clone());
         calls.borrow_mut().clear();
 
-        let mut lease = collection.hide_for_capture().expect("capture lease");
-        lease.complete_capture();
+        let lease = collection.hide_for_capture().expect("capture lease");
+
+        assert!(collection.test_capture_hidden());
+        assert_eq!(calls.borrow().as_slice(), ["visible:false", "flush"]);
         drop(lease);
 
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                "visible:false",
+                "flush",
+                "visible:true",
+                "request_redraw",
+                "flush"
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_session_owns_visibility_until_the_operation_drops() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let collection = collection(calls.clone());
+        commit_window(&collection, 1, calls.clone());
+        calls.borrow_mut().clear();
+        let lease = collection.hide_for_capture().expect("capture lease");
+
+        let operation =
+            crate::app::capture_operation::CaptureOperation::ready_with_pin_visibility_for_test(
+                RgbaImage::new(2, 2),
+                lease,
+            );
+        assert!(collection.test_capture_hidden());
+        assert_eq!(calls.borrow().as_slice(), ["visible:false", "flush"]);
+
+        drop(operation);
+        assert!(!collection.test_capture_hidden());
         assert_eq!(
             calls.borrow().as_slice(),
             [
@@ -808,6 +861,30 @@ mod tests {
 
         assert!(matches!(outcome, PinEventOutcome::Handled));
         assert!(collection.test_is_empty());
+    }
+
+    #[test]
+    fn broadcast_escape_closes_only_the_pin_under_the_cursor() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let collection = collection(calls.clone());
+        let first = RecordingWindow::new(1, calls.clone());
+        first.under_cursor.set(true);
+        collection
+            .prepare_created(Box::new(first))
+            .unwrap()
+            .commit(image());
+        let second = RecordingWindow::new(2, calls);
+        second.under_cursor.set(false);
+        collection
+            .prepare_created(Box::new(second))
+            .unwrap()
+            .commit(image());
+
+        collection.handle_window_event(WindowId::from_raw(1), escape_pressed());
+        collection.handle_window_event(WindowId::from_raw(2), escape_pressed());
+
+        assert_eq!(collection.test_len(), 1);
+        assert!(collection.test_contains(WindowId::from_raw(2)));
     }
 
     #[test]

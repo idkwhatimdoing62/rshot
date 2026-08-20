@@ -11,6 +11,7 @@ pub(crate) struct CaptureFrame<'a> {
     pub(super) text_editing: bool,
     pub(super) ime_preedit: &'a str,
     pub(super) cursor_visible: bool,
+    pub(super) caret_byte: usize,
     pub(super) tool: Tool,
     pub(super) color: [u8; 4],
     pub(super) toolbar_hover: Option<usize>,
@@ -37,6 +38,7 @@ impl<'a> CaptureFrame<'a> {
                 .map(|editor| editor.ime_preedit.as_str())
                 .unwrap_or(""),
             cursor_visible: editor.is_none_or(|editor| editor.cursor_visible),
+            caret_byte: editor.map_or(0, |editor| editor.caret_byte),
             tool: editor.map_or(Tool::Pen, |editor| editor.tool),
             color: editor.map_or([0; 4], |editor| editor.color),
             toolbar_hover: editor.and_then(|editor| editor.toolbar_hover),
@@ -64,6 +66,7 @@ pub(super) fn render_frame(buffer: &mut [u32], width: u32, height: u32, frame: &
                 annotation,
                 frame.ime_preedit,
                 frame.cursor_visible,
+                frame.caret_byte,
             );
         }
         draw_toolbar(

@@ -42,16 +42,14 @@ pub(super) fn capture(
     let monitor = capture_monitor(cursor).map_err(CaptureAttemptFailure::at)?;
     let target = match_overlay_monitor(context.event_loop, cursor)
         .ok_or_else(|| CaptureAttemptFailure::at(CaptureFailureStage::MatchOverlayMonitor))?;
-    let mut visibility =
-        context
-            .pins
-            .hide_for_capture()
-            .map_err(|failure| CaptureAttemptFailure {
-                stage: CaptureFailureStage::HidePins,
-                detail: failure.to_string(),
-            })?;
+    let visibility = context
+        .pins
+        .hide_for_capture()
+        .map_err(|failure| CaptureAttemptFailure {
+            stage: CaptureFailureStage::HidePins,
+            detail: failure.to_string(),
+        })?;
     let frozen_image = capture_image(&monitor).map_err(CaptureAttemptFailure::at)?;
-    visibility.complete_capture();
     let windows = visible_windows();
     let window = create_overlay(context.event_loop, target.overlay_monitor).map_err(|failure| {
         CaptureAttemptFailure {
@@ -65,5 +63,6 @@ pub(super) fn capture(
         cursor,
         target.origin,
         windows,
-    ))
+    )
+    .with_pin_visibility(visibility))
 }
