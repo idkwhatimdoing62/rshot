@@ -13,6 +13,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Consecutive screenshot session smoke test failed.' }
     cargo test completing_pixel_capture_keeps_pins_hidden_until_the_session_lease_drops
     if ($LASTEXITCODE -ne 0) { throw 'Pin coexistence smoke test failed.' }
+    cargo test preview_and_output_share_mosaic_pixels
+    if ($LASTEXITCODE -ne 0) { throw 'Mosaic output smoke test failed.' }
     cargo test model_failure_falls_back_once
     if ($LASTEXITCODE -ne 0) { throw 'OCR fallback smoke test failed.' }
 }

@@ -139,9 +139,12 @@ impl Interaction {
 mod tests {
     use super::*;
     use crate::app::capture_operation::{CaptureCommand, CapturePhase};
-    use crate::app::editor::{PALETTE, Tool, ToolbarItem};
+    use crate::app::editor::{PALETTE, Tool, ToolbarAction, ToolbarItem};
+    use crate::app::output::Shape;
     use std::time::{Duration, Instant};
-    use winit::event::WindowEvent;
+    use winit::dpi::PhysicalPosition;
+    use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+    use winit::keyboard::{Key, KeyCode, KeyLocation, PhysicalKey};
 
     struct FixedMetrics;
 
@@ -163,9 +166,68 @@ mod tests {
         )
     }
 
+    fn mosaic_interaction() -> Interaction {
+        Interaction::with_metrics(
+            InteractionConfig {
+                cursor: (200, 200),
+                origin: (0, 0),
+                windows: Vec::new(),
+                image_size: (800, 600),
+            },
+            Box::new(FixedMetrics),
+        )
+    }
+
     fn enter_editing(interaction: &mut Interaction) {
         interaction.set_selection(Some(((10, 10), (70, 60))));
         interaction.finish_selection_gesture(false, None);
+    }
+
+    fn key_m_pressed() -> WindowEvent {
+        WindowEvent::KeyboardInput {
+            device_id: None,
+            event: KeyEvent {
+                physical_key: PhysicalKey::Code(KeyCode::KeyM),
+                logical_key: Key::Character("m".into()),
+                text: Some("m".into()),
+                location: KeyLocation::Standard,
+                state: ElementState::Pressed,
+                repeat: false,
+                text_with_all_modifiers: Some("m".into()),
+                key_without_modifiers: Key::Character("m".into()),
+            },
+            is_synthetic: false,
+        }
+    }
+
+    fn pointer_moved(point: (i32, i32)) -> WindowEvent {
+        WindowEvent::PointerMoved {
+            device_id: None,
+            position: PhysicalPosition::new(f64::from(point.0), f64::from(point.1)),
+            primary: true,
+            source: winit::event::PointerSource::Mouse,
+        }
+    }
+
+    fn pointer_button(state: ElementState, point: (i32, i32)) -> WindowEvent {
+        WindowEvent::PointerButton {
+            device_id: None,
+            state,
+            position: PhysicalPosition::new(f64::from(point.0), f64::from(point.1)),
+            primary: true,
+            button: MouseButton::Left.into(),
+        }
+    }
+
+    fn drag(interaction: &mut Interaction, start: (i32, i32), end: (i32, i32)) {
+        let viewport = Viewport {
+            width: 800,
+            height: 600,
+        };
+        interaction.handle_event(pointer_moved(start), viewport);
+        interaction.handle_event(pointer_button(ElementState::Pressed, start), viewport);
+        interaction.handle_event(pointer_moved(end), viewport);
+        interaction.handle_event(pointer_button(ElementState::Released, end), viewport);
     }
 
     #[test]
@@ -219,6 +281,41 @@ mod tests {
         assert_eq!(interaction.output_snapshot().revision, before);
         interaction.start_shape((5, 5));
         assert!(interaction.output_snapshot().revision > before);
+    }
+
+    #[test]
+    fn m_selects_the_mosaic_tool() {
+        let mut interaction = interaction();
+        enter_editing(&mut interaction);
+
+        let outcome = interaction.handle_event(key_m_pressed(), Viewport::default());
+
+        assert_eq!(
+            interaction.frame().editor.expect("editor").tool,
+            Tool::Mosaic
+        );
+        assert!(outcome.redraw);
+    }
+
+    #[test]
+    fn pointer_drags_create_multiple_mosaics_and_real_undo_removes_only_the_latest() {
+        let mut interaction = mosaic_interaction();
+        interaction.set_selection(Some(((100, 100), (700, 500))));
+        interaction.finish_selection_gesture(false, None);
+        interaction.apply_toolbar_item(ToolbarItem::Tool(Tool::Mosaic));
+
+        drag(&mut interaction, (200, 200), (240, 240));
+        drag(&mut interaction, (300, 300), (340, 340));
+        drag(&mut interaction, (400, 400), (440, 400));
+
+        assert_eq!(interaction.output_snapshot().annotations.len(), 2);
+        interaction.apply_toolbar_item(ToolbarItem::Action(ToolbarAction::Undo));
+        let annotations = interaction.output_snapshot().annotations;
+        assert_eq!(annotations.len(), 1);
+        assert!(matches!(
+            annotations[0].shape,
+            Shape::Mosaic((200, 200), (240, 240))
+        ));
     }
 
     #[test]

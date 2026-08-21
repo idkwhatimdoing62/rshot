@@ -104,7 +104,7 @@ impl Interaction {
                         return CaptureCommand::None;
                     }
                     if event.physical_key == PhysicalKey::Code(KeyCode::KeyM) && self.is_editing() {
-                        editor!(self).tool = Tool::Rect;
+                        editor!(self).tool = Tool::Mosaic;
                         self.request_redraw();
                         return CaptureCommand::None;
                     }

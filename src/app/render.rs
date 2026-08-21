@@ -219,6 +219,7 @@ pub(super) fn draw_toolbar(
                     ToolbarItem::Tool(Tool::Pen) => "PEN",
                     ToolbarItem::Tool(Tool::Line) => "LINE",
                     ToolbarItem::Tool(Tool::Rect) => "RECT",
+                    ToolbarItem::Tool(Tool::Mosaic) => "MOSAIC",
                     ToolbarItem::Tool(Tool::Text) => "TEXT",
                     ToolbarItem::Action(ToolbarAction::Copy) => "COPY",
                     ToolbarItem::Action(ToolbarAction::Ocr) => "OCR",
@@ -344,6 +345,9 @@ pub(super) fn draw_text(
 
 pub(super) fn glyph(ch: char) -> [u8; 7] {
     match ch {
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
         'C' => [
             0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
         ],
@@ -376,6 +380,9 @@ pub(super) fn glyph(ch: char) -> [u8; 7] {
         ],
         'L' => [
             0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'M' => [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
         ],
         'T' => [
             0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
