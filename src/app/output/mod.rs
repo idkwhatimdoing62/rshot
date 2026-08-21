@@ -5,7 +5,9 @@ pub(super) use model::{Annotation, Shape};
 pub(super) use raster::render_preview_annotations;
 
 use crate::app::geometry::{crop_image, normalized_rect};
-use raster::{TextRasterizer, WindowsTextRasterizer, render_image_annotations};
+use raster::{
+    TextRasterizer, WindowsTextRasterizer, apply_image_mosaics, render_image_annotations,
+};
 use std::borrow::Cow;
 use xcap::image::RgbaImage;
 
@@ -75,10 +77,18 @@ fn compose_with_text<'a>(
             image: Cow::Borrowed(description.frozen_image),
         });
     }
+    let has_mosaic = description
+        .annotations
+        .iter()
+        .any(|annotation| matches!(annotation.shape, Shape::Mosaic(..)));
+    let mut mosaic_image = has_mosaic.then(|| description.frozen_image.clone());
+    if let Some(image) = mosaic_image.as_mut() {
+        apply_image_mosaics(image, description.frozen_image, description.annotations);
+    }
+    let source = mosaic_image.as_ref().unwrap_or(description.frozen_image);
     let mut image = match description.selection {
-        Some((a, b)) => crop_image(description.frozen_image, a, b)
-            .ok_or(OutputFailureStage::InvalidSelection)?,
-        None => description.frozen_image.clone(),
+        Some((a, b)) => crop_image(source, a, b).ok_or(OutputFailureStage::InvalidSelection)?,
+        None => source.clone(),
     };
     let origin = description
         .selection
@@ -195,7 +205,7 @@ mod tests {
         )
         .unwrap();
         let mut preview = vec![0; 64];
-        render_preview_annotations(&mut preview, 8, 8, &annotations);
+        render_preview_annotations(&mut preview, 8, 8, &frozen, None, &annotations);
 
         for y in 0..8 {
             for x in 0..8 {
@@ -204,6 +214,207 @@ mod tests {
                 assert_eq!(preview[(y * 8 + x) as usize], rgb);
             }
         }
+    }
+
+    #[test]
+    fn mosaic_block_uses_the_average_color_from_frozen_pixels() {
+        let frozen = RgbaImage::from_fn(4, 2, |x, y| Rgba([((y * 4 + x) * 10) as u8, 0, 0, 255]));
+        let annotations = [Annotation {
+            shape: Shape::Mosaic((0, 0), (4, 2)),
+            color: [0; 4],
+        }];
+
+        let output = compose_with_text(
+            OutputDescription {
+                frozen_image: &frozen,
+                selection: None,
+                annotations: &annotations,
+            },
+            &FixedText,
+        )
+        .unwrap();
+
+        assert!(
+            output
+                .image()
+                .pixels()
+                .all(|pixel| pixel.0 == [35, 0, 0, 255])
+        );
+    }
+
+    #[test]
+    fn preview_and_output_share_mosaic_pixels() {
+        let frozen = RgbaImage::from_fn(4, 2, |x, y| Rgba([((y * 4 + x) * 10) as u8, 20, 30, 255]));
+        let annotations = [Annotation {
+            shape: Shape::Mosaic((0, 0), (4, 2)),
+            color: [0; 4],
+        }];
+        let output = compose_with_text(
+            OutputDescription {
+                frozen_image: &frozen,
+                selection: None,
+                annotations: &annotations,
+            },
+            &FixedText,
+        )
+        .unwrap();
+        let mut preview = frozen
+            .pixels()
+            .map(|pixel| {
+                (u32::from(pixel[0]) << 16) | (u32::from(pixel[1]) << 8) | u32::from(pixel[2])
+            })
+            .collect::<Vec<_>>();
+
+        render_preview_annotations(&mut preview, 4, 2, &frozen, None, &annotations);
+
+        for (actual, expected) in preview.iter().zip(output.image().pixels()) {
+            assert_eq!(
+                *actual,
+                (u32::from(expected[0]) << 16)
+                    | (u32::from(expected[1]) << 8)
+                    | u32::from(expected[2])
+            );
+        }
+    }
+
+    #[test]
+    fn selection_crops_mosaic_without_realigning_its_twelve_pixel_grid() {
+        let frozen = RgbaImage::from_fn(24, 1, |x, _| Rgba([x as u8, 0, 0, 255]));
+        let annotations = [Annotation {
+            shape: Shape::Mosaic((0, 0), (24, 1)),
+            color: [0; 4],
+        }];
+
+        let output = compose_with_text(
+            OutputDescription {
+                frozen_image: &frozen,
+                selection: Some(((6, 0), (18, 1))),
+                annotations: &annotations,
+            },
+            &FixedText,
+        )
+        .unwrap();
+
+        assert_eq!(output.dimensions(), (12, 1));
+        assert!(output.image().pixels().take(6).all(|pixel| pixel[0] == 5));
+        assert!(output.image().pixels().skip(6).all(|pixel| pixel[0] == 17));
+    }
+
+    #[test]
+    fn preview_clips_mosaic_to_selection_without_realigning_the_grid() {
+        let frozen = RgbaImage::from_fn(24, 1, |x, _| Rgba([x as u8, 0, 0, 255]));
+        let annotations = [Annotation {
+            shape: Shape::Mosaic((0, 0), (24, 1)),
+            color: [0; 4],
+        }];
+        let mut preview = (0_u32..24).map(|x| x << 16).collect::<Vec<_>>();
+
+        render_preview_annotations(
+            &mut preview,
+            24,
+            1,
+            &frozen,
+            Some(((6, 0), (18, 1))),
+            &annotations,
+        );
+
+        assert_eq!(preview[0], 0);
+        assert!(preview[6..12].iter().all(|pixel| *pixel == 5 << 16));
+        assert!(preview[12..18].iter().all(|pixel| *pixel == 17 << 16));
+        assert_eq!(preview[23], 23 << 16);
+    }
+
+    #[test]
+    fn overlapping_mosaics_sample_the_frozen_image_independent_of_creation_order() {
+        let frozen = RgbaImage::from_fn(24, 1, |x, _| Rgba([x as u8, 0, 0, 255]));
+        let first = Annotation {
+            shape: Shape::Mosaic((0, 0), (24, 1)),
+            color: [0; 4],
+        };
+        let second = Annotation {
+            shape: Shape::Mosaic((6, 0), (18, 1)),
+            color: [0; 4],
+        };
+
+        let forward = compose_with_text(
+            OutputDescription {
+                frozen_image: &frozen,
+                selection: None,
+                annotations: &[first.clone(), second.clone()],
+            },
+            &FixedText,
+        )
+        .unwrap()
+        .into_owned();
+        let reversed = compose_with_text(
+            OutputDescription {
+                frozen_image: &frozen,
+                selection: None,
+                annotations: &[second, first],
+            },
+            &FixedText,
+        )
+        .unwrap()
+        .into_owned();
+
+        assert_eq!(forward, reversed);
+    }
+
+    #[test]
+    fn ordinary_annotations_are_drawn_above_mosaic_regions() {
+        let frozen = RgbaImage::from_fn(24, 3, |x, _| Rgba([x as u8, 0, 0, 255]));
+        let annotations = [
+            Annotation {
+                shape: Shape::Line((0, 1), (23, 1)),
+                color: [255, 0, 0, 255],
+            },
+            Annotation {
+                shape: Shape::Mosaic((0, 0), (24, 3)),
+                color: [0; 4],
+            },
+        ];
+
+        let output = compose_with_text(
+            OutputDescription {
+                frozen_image: &frozen,
+                selection: None,
+                annotations: &annotations,
+            },
+            &FixedText,
+        )
+        .unwrap();
+
+        assert!((0..24).all(|x| output.image().get_pixel(x, 1).0 == [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn clipping_at_the_frozen_image_edge_does_not_realign_the_mosaic_grid() {
+        let frozen = RgbaImage::from_fn(20, 1, |x, _| Rgba([x as u8, 0, 0, 255]));
+        let annotations = [Annotation {
+            shape: Shape::Mosaic((-5, 0), (15, 1)),
+            color: [0; 4],
+        }];
+
+        let output = compose_with_text(
+            OutputDescription {
+                frozen_image: &frozen,
+                selection: None,
+                annotations: &annotations,
+            },
+            &FixedText,
+        )
+        .unwrap();
+
+        assert!(output.image().pixels().take(7).all(|pixel| pixel[0] == 3));
+        assert!(
+            output
+                .image()
+                .pixels()
+                .skip(7)
+                .take(8)
+                .all(|pixel| pixel[0] == 10)
+        );
+        assert_eq!(output.image().get_pixel(15, 0)[0], 15);
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub(super) enum Tool {
     Pen,
     Line,
     Rect,
+    Mosaic,
     Text,
 }
 
@@ -84,6 +85,7 @@ impl EditorState {
             Tool::Pen => Shape::Pen(vec![point]),
             Tool::Line => Shape::Line(point, point),
             Tool::Rect => Shape::Rect(point, point),
+            Tool::Mosaic => Shape::Mosaic(point, point),
             Tool::Text => return,
         };
         self.annotations.push(Annotation {
@@ -98,7 +100,7 @@ impl EditorState {
         };
         match &mut annotation.shape {
             Shape::Pen(points) => points.push(point),
-            Shape::Line(_, end) | Shape::Rect(_, end) => *end = point,
+            Shape::Line(_, end) | Shape::Rect(_, end) | Shape::Mosaic(_, end) => *end = point,
             Shape::Text(..) => {}
         }
     }
@@ -110,6 +112,7 @@ impl EditorState {
         let (drop, dot) = match &annotation.shape {
             Shape::Pen(points) => (false, points.len() == 1),
             Shape::Line(start, end) | Shape::Rect(start, end) => (start == end, false),
+            Shape::Mosaic(start, end) => (start.0 == end.0 || start.1 == end.1, false),
             Shape::Text(..) => (false, false),
         };
         if drop {
@@ -236,15 +239,15 @@ impl EditorState {
 }
 
 pub(super) const TOOLBAR_HEIGHT: i32 = 38;
-pub(super) const TOOLBAR_GAP: i32 = 4;
+pub(super) const TOOLBAR_GAP: i32 = 1;
 pub(super) const SWATCH: i32 = 26; // 色板色块边长
 pub(super) const SWATCH_GAP: i32 = 4;
 pub(super) const PALETTE_PAD: i32 = 6; // 色板弹层内边距
 
-// 单行工具栏：PEN / LINE / RECT / TEXT / COLOR / UNDO / COPY / OCR / PIN / SELECT / X
-pub(super) const TOOLBAR_ITEM_WIDTHS: [i32; 11] = [46, 50, 50, 50, 44, 50, 50, 42, 44, 74, 30];
-pub(super) const TOOLBAR_SLOT_COUNT: usize = 11;
-pub(super) const TOOLBAR_SLOT_COLOR: usize = 4;
+// 单行工具栏：PEN / LINE / RECT / MOSAIC / TEXT / COLOR / UNDO / COPY / OCR / PIN / SELECT / X
+pub(super) const TOOLBAR_ITEM_WIDTHS: [i32; 12] = [46, 50, 50, 74, 50, 44, 50, 50, 42, 44, 74, 30];
+pub(super) const TOOLBAR_SLOT_COUNT: usize = 12;
+pub(super) const TOOLBAR_SLOT_COLOR: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ToolbarItem {
@@ -269,13 +272,14 @@ pub(super) fn toolbar_item(slot: usize) -> ToolbarItem {
         0 => ToolbarItem::Tool(Tool::Pen),
         1 => ToolbarItem::Tool(Tool::Line),
         2 => ToolbarItem::Tool(Tool::Rect),
-        3 => ToolbarItem::Tool(Tool::Text),
-        4 => ToolbarItem::Color,
-        5 => ToolbarItem::Action(ToolbarAction::Undo),
-        6 => ToolbarItem::Action(ToolbarAction::Copy),
-        7 => ToolbarItem::Action(ToolbarAction::Ocr),
-        8 => ToolbarItem::Action(ToolbarAction::Pin),
-        9 => ToolbarItem::Action(ToolbarAction::Reselect),
+        3 => ToolbarItem::Tool(Tool::Mosaic),
+        4 => ToolbarItem::Tool(Tool::Text),
+        5 => ToolbarItem::Color,
+        6 => ToolbarItem::Action(ToolbarAction::Undo),
+        7 => ToolbarItem::Action(ToolbarAction::Copy),
+        8 => ToolbarItem::Action(ToolbarAction::Ocr),
+        9 => ToolbarItem::Action(ToolbarAction::Pin),
+        10 => ToolbarItem::Action(ToolbarAction::Reselect),
         _ => ToolbarItem::Action(ToolbarAction::Close),
     }
 }
@@ -285,14 +289,15 @@ pub(super) fn toolbar_item_slot(item: ToolbarItem) -> usize {
         ToolbarItem::Tool(Tool::Pen) => 0,
         ToolbarItem::Tool(Tool::Line) => 1,
         ToolbarItem::Tool(Tool::Rect) => 2,
-        ToolbarItem::Tool(Tool::Text) => 3,
-        ToolbarItem::Color => 4,
-        ToolbarItem::Action(ToolbarAction::Undo) => 5,
-        ToolbarItem::Action(ToolbarAction::Copy) => 6,
-        ToolbarItem::Action(ToolbarAction::Ocr) => 7,
-        ToolbarItem::Action(ToolbarAction::Pin) => 8,
-        ToolbarItem::Action(ToolbarAction::Reselect) => 9,
-        ToolbarItem::Action(ToolbarAction::Close) => 10,
+        ToolbarItem::Tool(Tool::Mosaic) => 3,
+        ToolbarItem::Tool(Tool::Text) => 4,
+        ToolbarItem::Color => 5,
+        ToolbarItem::Action(ToolbarAction::Undo) => 6,
+        ToolbarItem::Action(ToolbarAction::Copy) => 7,
+        ToolbarItem::Action(ToolbarAction::Ocr) => 8,
+        ToolbarItem::Action(ToolbarAction::Pin) => 9,
+        ToolbarItem::Action(ToolbarAction::Reselect) => 10,
+        ToolbarItem::Action(ToolbarAction::Close) => 11,
     }
 }
 
@@ -425,5 +430,47 @@ mod text_editing_tests {
             panic!("text")
         };
         assert_eq!(text, "中你文");
+    }
+}
+
+#[cfg(test)]
+mod mosaic_editing_tests {
+    use super::*;
+
+    #[test]
+    fn mosaic_draft_records_a_region_and_discards_zero_area_gestures() {
+        let mut editor = EditorState {
+            tool: Tool::Mosaic,
+            ..EditorState::default()
+        };
+
+        editor.start_shape((4, 5));
+        editor.update_draft((20, 25));
+        editor.commit_draft();
+
+        assert!(matches!(
+            editor.annotations.as_slice(),
+            [Annotation {
+                shape: Shape::Mosaic((4, 5), (20, 25)),
+                ..
+            }]
+        ));
+
+        let mut editor = EditorState {
+            tool: Tool::Mosaic,
+            ..EditorState::default()
+        };
+
+        editor.start_shape((8, 8));
+        editor.commit_draft();
+        assert!(editor.annotations.is_empty());
+
+        editor.start_shape((8, 8));
+        editor.update_draft((20, 8));
+        editor.commit_draft();
+        editor.start_shape((8, 8));
+        editor.update_draft((8, 20));
+        editor.commit_draft();
+        assert!(editor.annotations.is_empty());
     }
 }

@@ -54,7 +54,14 @@ pub(super) fn render_frame(buffer: &mut [u32], width: u32, height: u32, frame: &
         shade_outside(buffer, width, height, a, b);
         draw_rect(buffer, width, height, a.0, a.1, b.0, b.1, 0x00FF0000, 3);
     }
-    render_preview_annotations(buffer, width, height, frame.annotations);
+    render_preview_annotations(
+        buffer,
+        width,
+        height,
+        frame.frozen_image,
+        frame.selection,
+        frame.annotations,
+    );
     if frame.editing {
         if frame.text_editing
             && let Some(annotation) = frame.annotations.last()

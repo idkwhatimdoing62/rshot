@@ -4,6 +4,7 @@ use crate::app::windows_adapter::gdi_render_text_rgba;
 use xcap::image::{Rgba, RgbaImage};
 
 pub(super) const ANNOT_LINE_T: i32 = 1;
+pub(super) const MOSAIC_BLOCK_SIZE: i32 = 12;
 
 pub(super) trait TextRasterizer {
     fn rasterize(
@@ -70,12 +71,98 @@ pub(super) fn render_image_annotations(
     render_annotations(&mut ImageTarget(image), annotations, origin, text)
 }
 
+pub(super) fn apply_image_mosaics(
+    target: &mut RgbaImage,
+    frozen_image: &RgbaImage,
+    annotations: &[Annotation],
+) {
+    for (a, b) in sorted_mosaic_regions(annotations) {
+        pixelate_image(target, frozen_image, a, b);
+    }
+}
+
+fn sorted_mosaic_regions(annotations: &[Annotation]) -> Vec<((i32, i32), (i32, i32))> {
+    let mut regions = annotations
+        .iter()
+        .filter_map(|annotation| {
+            let Shape::Mosaic(a, b) = annotation.shape else {
+                return None;
+            };
+            let (left, top, right, bottom) = normalized_rect((a, b));
+            Some(((left, top), (right, bottom)))
+        })
+        .collect::<Vec<_>>();
+    regions.sort_unstable();
+    regions
+}
+
+fn pixelate_image(target: &mut RgbaImage, source: &RgbaImage, a: (i32, i32), b: (i32, i32)) {
+    for_each_mosaic_block(source, a, b, |bounds, average| {
+        let (left, top, right, bottom) = bounds;
+        let average = Rgba(average);
+        for y in top..bottom {
+            for x in left..right {
+                target.put_pixel(x as u32, y as u32, average);
+            }
+        }
+    });
+}
+
+fn for_each_mosaic_block(
+    source: &RgbaImage,
+    a: (i32, i32),
+    b: (i32, i32),
+    mut apply: impl FnMut((i32, i32, i32, i32), [u8; 4]),
+) {
+    let (left, top, right, bottom) = normalized_rect((a, b));
+    let mut block_y = top;
+    while block_y < bottom {
+        let block_bottom = block_y.saturating_add(MOSAIC_BLOCK_SIZE).min(bottom);
+        let mut block_x = left;
+        while block_x < right {
+            let block_right = block_x.saturating_add(MOSAIC_BLOCK_SIZE).min(right);
+            let sample_left = block_x.clamp(0, source.width() as i32);
+            let sample_top = block_y.clamp(0, source.height() as i32);
+            let sample_right = block_right.clamp(0, source.width() as i32);
+            let sample_bottom = block_bottom.clamp(0, source.height() as i32);
+            let mut sums = [0_u64; 4];
+            let mut count = 0_u64;
+            for y in sample_top..sample_bottom {
+                for x in sample_left..sample_right {
+                    let pixel = source.get_pixel(x as u32, y as u32).0;
+                    for channel in 0..4 {
+                        sums[channel] += u64::from(pixel[channel]);
+                    }
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                let average = sums.map(|sum| (sum / count) as u8);
+                apply(
+                    (sample_left, sample_top, sample_right, sample_bottom),
+                    average,
+                );
+            }
+            block_x = block_right;
+        }
+        block_y = block_bottom;
+    }
+}
+
 pub(crate) fn render_preview_annotations(
     buffer: &mut [u32],
     width: u32,
     height: u32,
+    frozen_image: &RgbaImage,
+    selection: Option<((i32, i32), (i32, i32))>,
     annotations: &[Annotation],
 ) {
+    let clip = selection
+        .map(normalized_rect)
+        .unwrap_or((0, 0, width as i32, height as i32));
+    for (a, b) in sorted_mosaic_regions(annotations) {
+        pixelate_buffer(buffer, width, height, frozen_image, a, b, clip);
+    }
     let _ = render_annotations(
         &mut BufferTarget {
             buffer,
@@ -86,6 +173,32 @@ pub(crate) fn render_preview_annotations(
         (0, 0),
         &PreviewTextRasterizer,
     );
+}
+
+fn pixelate_buffer(
+    target: &mut [u32],
+    width: u32,
+    height: u32,
+    source: &RgbaImage,
+    a: (i32, i32),
+    b: (i32, i32),
+    clip: (i32, i32, i32, i32),
+) {
+    for_each_mosaic_block(source, a, b, |bounds, average| {
+        let color =
+            u32::from(average[0]) << 16 | u32::from(average[1]) << 8 | u32::from(average[2]);
+        let write_left = bounds.0.max(clip.0);
+        let write_top = bounds.1.max(clip.1);
+        let write_right = bounds.2.min(clip.2).min(width as i32);
+        let write_bottom = bounds.3.min(clip.3).min(height as i32);
+        if write_left < write_right && write_top < write_bottom {
+            for y in write_top..write_bottom {
+                for x in write_left..write_right {
+                    target[(y as u32 * width + x as u32) as usize] = color;
+                }
+            }
+        }
+    });
 }
 
 fn render_annotations(
@@ -113,6 +226,7 @@ fn render_annotations(
             Shape::Rect(a, b) => {
                 target.draw_rect(translate(*a), translate(*b), annotation.color, 3)
             }
+            Shape::Mosaic(..) => {}
             Shape::Text(position, value) => {
                 if let Some(raster) = text.rasterize(value, annotation.color)? {
                     target.blend(translate(*position), &raster);

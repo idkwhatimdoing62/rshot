@@ -552,7 +552,7 @@ mod tests {
         OcrCharacterData, OcrEvent, OcrLineData, OcrRecognition, OcrRegionData, OcrSessionId,
         OcrWordData, PALETTE, SessionFailure, SessionFailureStage, TEXT_FONT_HEIGHT,
         TOOLBAR_SLOT_COLOR, TOOLBAR_SLOT_COUNT, Tool, ToolbarAction, ToolbarItem, blit_rgba_image,
-        build_about_message, capture_failure_log_line, color_u32, crop_image, gdi_text_size,
+        build_about_message, capture_failure_log_line, color_u32, crop_image, gdi_text_size, glyph,
         is_cjk_language_tag, normalized_rect, ocr_region, palette_hit, palette_popup_rect,
         palette_swatch_rect, prepare_ocr_rgba, prepare_ocr_rgba_for_recognition,
         prepare_ocr_worker_rgba, rebuild_model_ocr_text, rebuild_ocr_text,
@@ -690,21 +690,37 @@ mod tests {
         assert_eq!(toolbar_item(0), ToolbarItem::Tool(Tool::Pen));
         assert_eq!(toolbar_item(1), ToolbarItem::Tool(Tool::Line));
         assert_eq!(toolbar_item(2), ToolbarItem::Tool(Tool::Rect));
-        assert_eq!(toolbar_item(3), ToolbarItem::Tool(Tool::Text));
-        assert_eq!(toolbar_item(4), ToolbarItem::Color);
-        assert_eq!(toolbar_item(5), ToolbarItem::Action(ToolbarAction::Undo));
-        assert_eq!(toolbar_item(7), ToolbarItem::Action(ToolbarAction::Ocr));
-        assert_eq!(toolbar_item(10), ToolbarItem::Action(ToolbarAction::Close));
-        assert_eq!(toolbar_item_slot(ToolbarItem::Color), 4);
+        assert_eq!(toolbar_item(3), ToolbarItem::Tool(Tool::Mosaic));
+        assert_eq!(toolbar_item(4), ToolbarItem::Tool(Tool::Text));
+        assert_eq!(toolbar_item(5), ToolbarItem::Color);
+        assert_eq!(toolbar_item(6), ToolbarItem::Action(ToolbarAction::Undo));
+        assert_eq!(toolbar_item(8), ToolbarItem::Action(ToolbarAction::Ocr));
+        assert_eq!(toolbar_item(11), ToolbarItem::Action(ToolbarAction::Close));
+        assert_eq!(toolbar_item_slot(ToolbarItem::Color), 5);
         assert_eq!(
             toolbar_item_slot(ToolbarItem::Action(ToolbarAction::Ocr)),
-            7
+            8
         );
     }
 
     #[test]
     fn toolbar_fits_a_640_pixel_wide_screen() {
         assert!(toolbar_size().0 <= 640 - 16);
+    }
+
+    #[test]
+    fn mosaic_toolbar_item_has_room_for_the_full_label() {
+        let rect = toolbar_item_rect((0, 0), 3);
+        assert!(rect.2 - rect.0 >= 74);
+    }
+
+    #[test]
+    fn mosaic_toolbar_label_has_every_required_glyph() {
+        assert!(
+            "MOSAIC"
+                .chars()
+                .all(|character| glyph(character).iter().any(|row| *row != 0))
+        );
     }
 
     #[test]
