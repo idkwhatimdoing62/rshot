@@ -212,7 +212,10 @@ pub(super) fn gdi_render_text_rgba(text: &str, color: [u8; 4]) -> Option<(i32, i
         let _ = DeleteDC(hdc);
         // BGRA(top-down) → RGBA，覆盖率 = 灰度亮度，按目标色染色
         let mut rgba = vec![0u8; raw.len()];
-        for (dst, src) in rgba.chunks_exact_mut(4).zip(raw.chunks_exact(4)) {
+        let (rgba_pixels, rgba_remainder) = rgba.as_chunks_mut::<4>();
+        let (raw_pixels, raw_remainder) = raw.as_chunks::<4>();
+        debug_assert!(rgba_remainder.is_empty() && raw_remainder.is_empty());
+        for (dst, src) in rgba_pixels.iter_mut().zip(raw_pixels) {
             let cov = ((src[0] as u32 + src[1] as u32 + src[2] as u32) / 3) as u8;
             dst[0] = (color[0] as u32 * cov as u32 / 255) as u8;
             dst[1] = (color[1] as u32 * cov as u32 / 255) as u8;

@@ -625,9 +625,11 @@ mod tests {
     fn unicode_text_is_null_terminated_utf16() {
         let bytes = unicode_text_bytes("中文😄\nabc");
         assert_eq!(&bytes[bytes.len() - 2..], &[0, 0]);
-        let units = bytes[..bytes.len() - 2]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        let (pairs, remainder) = bytes[..bytes.len() - 2].as_chunks::<2>();
+        assert!(remainder.is_empty());
+        let units = pairs
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect::<Vec<_>>();
         assert_eq!(String::from_utf16(&units).unwrap(), "中文😄\nabc");
     }
