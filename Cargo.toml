@@ -1,6 +1,6 @@
 [package]
 name = "rshot"
-version = "0.3.0-rc.3"
+version = "0.3.0-rc.4"
 edition = "2024"
 
 [dependencies]
@@ -22,6 +22,6 @@ zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 
 
 [dependencies.confy]
-version = "2.0.0"           # ← 补上,填你 cargo add 装到的版本
+version = "2.0.0"
 features = ["yaml_conf"]
 default-features = false

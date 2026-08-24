@@ -258,22 +258,7 @@ pub(super) fn cleanup_expired_in(
 
 fn cleanup_expired(now: SystemTime) -> io::Result<CleanupReport> {
     let protected = super::clipboard::current_clipboard_file_paths()?;
-    let mut report = cleanup_expired_in(&temp_png_dir(), now, &protected)?;
-    let legacy = std::env::temp_dir().join("rshot.png");
-    if !protected.iter().any(|item| item == &legacy)
-        && let Ok(metadata) = fs::symlink_metadata(&legacy)
-        && safe_regular_file(&metadata)
-        && metadata
-            .modified()
-            .is_ok_and(|modified| expired(modified, now))
-    {
-        match fs::remove_file(legacy) {
-            Ok(()) => report.deleted += 1,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => report.failures += 1,
-        }
-    }
-    Ok(report)
+    cleanup_expired_in(&temp_png_dir(), now, &protected)
 }
 
 #[cfg(test)]
