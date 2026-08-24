@@ -217,6 +217,41 @@ mod tests {
     }
 
     #[test]
+    fn preview_and_output_share_fixed_arrow_geometry() {
+        let frozen = RgbaImage::new(32, 32);
+        let annotations = [Annotation {
+            shape: Shape::Arrow((4, 16), (20, 16)),
+            color: [255, 0, 0, 255],
+        }];
+        let output = compose_with_text(
+            OutputDescription {
+                frozen_image: &frozen,
+                selection: None,
+                annotations: &annotations,
+            },
+            &FixedText,
+        )
+        .unwrap();
+        let mut preview = vec![0; 32 * 32];
+        render_preview_annotations(&mut preview, 32, 32, &frozen, None, &annotations);
+
+        for point in [(4, 16), (20, 16), (10, 10), (10, 22)] {
+            assert_eq!(
+                output.image().get_pixel(point.0, point.1).0,
+                [255, 0, 0, 255]
+            );
+            assert_eq!(preview[(point.1 * 32 + point.0) as usize], 0x00ff0000);
+        }
+        for y in 0..32 {
+            for x in 0..32 {
+                let rgba = output.image().get_pixel(x, y).0;
+                let rgb = (rgba[0] as u32) << 16 | (rgba[1] as u32) << 8 | rgba[2] as u32;
+                assert_eq!(preview[(y * 32 + x) as usize], rgb);
+            }
+        }
+    }
+
+    #[test]
     fn mosaic_block_uses_the_average_color_from_frozen_pixels() {
         let frozen = RgbaImage::from_fn(4, 2, |x, y| Rgba([((y * 4 + x) * 10) as u8, 0, 0, 255]));
         let annotations = [Annotation {

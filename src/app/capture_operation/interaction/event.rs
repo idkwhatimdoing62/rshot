@@ -108,6 +108,11 @@ impl Interaction {
                         self.request_redraw();
                         return CaptureCommand::None;
                     }
+                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyA) && self.is_editing() {
+                        editor!(self).tool = Tool::Arrow;
+                        self.request_redraw();
+                        return CaptureCommand::None;
+                    }
                     if event.physical_key == PhysicalKey::Code(KeyCode::KeyT) && self.is_editing() {
                         editor!(self).tool = Tool::Text;
                         self.request_redraw();
@@ -299,10 +304,10 @@ impl Interaction {
                         editor!(self).palette_pressed = None;
                     }
                 }
-                // 右键抬起 = 确认（有手动框裁框，否则全屏）。
+                // 右键抬起 = 取消当前截图会话，与贴图窗口的右键关闭语义一致。
                 // 必须等抬起：若按下就关遮罩，抬起那半下会漏给下面窗口，触发系统右键菜单
                 if mb == Some(MouseButton::Right) && state == ElementState::Released {
-                    return CaptureCommand::Copy;
+                    return CaptureCommand::Close;
                 } else if mb == Some(MouseButton::Left) {
                     if self.is_editing() {
                         match state {

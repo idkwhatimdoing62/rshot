@@ -557,8 +557,9 @@ mod tests {
         palette_swatch_rect, prepare_ocr_rgba, prepare_ocr_rgba_for_recognition,
         prepare_ocr_worker_rgba, rebuild_model_ocr_text, rebuild_ocr_text,
         record_capture_failure_in, regroup_ocr_lines, restore_model_cross_region_spacing,
-        restore_model_region_spacing, toolbar_hit, toolbar_item, toolbar_item_rect,
-        toolbar_item_slot, toolbar_origin, toolbar_size, worker_protocol_round_trip,
+        restore_model_region_spacing, toolbar_hit, toolbar_icon_alpha, toolbar_item,
+        toolbar_item_rect, toolbar_item_slot, toolbar_origin, toolbar_size,
+        worker_protocol_round_trip,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -679,9 +680,17 @@ mod tests {
     fn toolbar_background_ends_at_last_item() {
         let origin = (40, 60);
         let (width, height) = toolbar_size();
-        let last = toolbar_item_rect(origin, TOOLBAR_SLOT_COUNT - 1);
-        assert_eq!(origin.0 + width, last.2);
-        assert_eq!(origin.1 + height, last.3);
+        let rects = (0..TOOLBAR_SLOT_COUNT)
+            .map(|slot| toolbar_item_rect(origin, slot))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            origin.0 + width,
+            rects.iter().map(|rect| rect.2).max().unwrap()
+        );
+        assert_eq!(
+            origin.1 + height,
+            rects.iter().map(|rect| rect.3).max().unwrap()
+        );
     }
 
     #[test]
@@ -689,17 +698,18 @@ mod tests {
         // 单行：4 个工具，COLOR 按钮，6 个动作
         assert_eq!(toolbar_item(0), ToolbarItem::Tool(Tool::Pen));
         assert_eq!(toolbar_item(1), ToolbarItem::Tool(Tool::Line));
-        assert_eq!(toolbar_item(2), ToolbarItem::Tool(Tool::Rect));
-        assert_eq!(toolbar_item(3), ToolbarItem::Tool(Tool::Mosaic));
-        assert_eq!(toolbar_item(4), ToolbarItem::Tool(Tool::Text));
-        assert_eq!(toolbar_item(5), ToolbarItem::Color);
-        assert_eq!(toolbar_item(6), ToolbarItem::Action(ToolbarAction::Undo));
-        assert_eq!(toolbar_item(8), ToolbarItem::Action(ToolbarAction::Ocr));
-        assert_eq!(toolbar_item(11), ToolbarItem::Action(ToolbarAction::Close));
-        assert_eq!(toolbar_item_slot(ToolbarItem::Color), 5);
+        assert_eq!(toolbar_item(2), ToolbarItem::Tool(Tool::Arrow));
+        assert_eq!(toolbar_item(3), ToolbarItem::Tool(Tool::Rect));
+        assert_eq!(toolbar_item(4), ToolbarItem::Tool(Tool::Mosaic));
+        assert_eq!(toolbar_item(5), ToolbarItem::Tool(Tool::Text));
+        assert_eq!(toolbar_item(6), ToolbarItem::Color);
+        assert_eq!(toolbar_item(7), ToolbarItem::Action(ToolbarAction::Undo));
+        assert_eq!(toolbar_item(9), ToolbarItem::Action(ToolbarAction::Ocr));
+        assert_eq!(toolbar_item(12), ToolbarItem::Action(ToolbarAction::Close));
+        assert_eq!(toolbar_item_slot(ToolbarItem::Color), 6);
         assert_eq!(
             toolbar_item_slot(ToolbarItem::Action(ToolbarAction::Ocr)),
-            8
+            9
         );
     }
 
@@ -709,9 +719,27 @@ mod tests {
     }
 
     #[test]
-    fn mosaic_toolbar_item_has_room_for_the_full_label() {
-        let rect = toolbar_item_rect((0, 0), 3);
-        assert!(rect.2 - rect.0 >= 74);
+    fn toolbar_icon_slots_are_compact_and_clearly_separated() {
+        assert_eq!(toolbar_size().1, 38);
+        for slot in 0..TOOLBAR_SLOT_COUNT - 1 {
+            let current = toolbar_item_rect((0, 0), slot);
+            let next = toolbar_item_rect((0, 0), slot + 1);
+            assert_eq!(current.2 - current.0, 34);
+            assert!(next.0 - current.2 >= 3);
+        }
+        for slot in 0..TOOLBAR_SLOT_COUNT {
+            assert!(
+                toolbar_icon_alpha(toolbar_item(slot))
+                    .iter()
+                    .any(|alpha| *alpha != 0)
+            );
+        }
+    }
+
+    #[test]
+    fn mosaic_toolbar_item_has_room_for_an_icon() {
+        let rect = toolbar_item_rect((0, 0), 4);
+        assert!(rect.2 - rect.0 >= 24);
     }
 
     #[test]
@@ -721,6 +749,12 @@ mod tests {
                 .chars()
                 .all(|character| glyph(character).iter().any(|row| *row != 0))
         );
+    }
+
+    #[test]
+    fn arrow_toolbar_item_has_room_for_an_icon() {
+        let rect = toolbar_item_rect((0, 0), 2);
+        assert!(rect.2 - rect.0 >= 24);
     }
 
     #[test]
