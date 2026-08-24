@@ -1,5 +1,9 @@
 # Third-party notices
 
+## Toolbar icons
+
+rshot includes modified 20×20 alpha-mask derivatives of selected Remix Icon line-style SVGs as functional toolbar controls. Remix Icon is copyright Remix Design and licensed under the Remix Icon License v1.0. Source and license: <https://github.com/Remix-Design/RemixIcon> and <https://github.com/Remix-Design/RemixIcon/blob/master/License>. The exact icon mapping is recorded in `assets/icons/remix/README.md`.
+
 rshot 的高精度本地 OCR 功能包含或使用以下开源组件与模型。运行时不向这些项目或其维护者发送图片、识别文字或遥测数据。
 
 | 项目 | 用途 | 许可证 | 来源 |

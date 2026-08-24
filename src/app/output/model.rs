@@ -2,6 +2,7 @@
 pub(crate) enum Shape {
     Pen(Vec<(i32, i32)>),
     Line((i32, i32), (i32, i32)),
+    Arrow((i32, i32), (i32, i32)),
     Rect((i32, i32), (i32, i32)),
     Mosaic((i32, i32), (i32, i32)),
     Text((i32, i32), String),

@@ -200,6 +200,23 @@ mod tests {
         }
     }
 
+    fn key_a_pressed() -> WindowEvent {
+        WindowEvent::KeyboardInput {
+            device_id: None,
+            event: KeyEvent {
+                physical_key: PhysicalKey::Code(KeyCode::KeyA),
+                logical_key: Key::Character("a".into()),
+                text: Some("a".into()),
+                location: KeyLocation::Standard,
+                state: ElementState::Pressed,
+                repeat: false,
+                text_with_all_modifiers: Some("a".into()),
+                key_without_modifiers: Key::Character("a".into()),
+            },
+            is_synthetic: false,
+        }
+    }
+
     fn pointer_moved(point: (i32, i32)) -> WindowEvent {
         WindowEvent::PointerMoved {
             device_id: None,
@@ -216,6 +233,16 @@ mod tests {
             position: PhysicalPosition::new(f64::from(point.0), f64::from(point.1)),
             primary: true,
             button: MouseButton::Left.into(),
+        }
+    }
+
+    fn right_button_released(point: (i32, i32)) -> WindowEvent {
+        WindowEvent::PointerButton {
+            device_id: None,
+            state: ElementState::Released,
+            position: PhysicalPosition::new(f64::from(point.0), f64::from(point.1)),
+            primary: false,
+            button: MouseButton::Right.into(),
         }
     }
 
@@ -319,12 +346,55 @@ mod tests {
     }
 
     #[test]
+    fn arrow_shortcut_drag_and_zero_length_gesture_follow_annotation_rules() {
+        let mut interaction = mosaic_interaction();
+        interaction.set_selection(Some(((100, 100), (700, 500))));
+        interaction.finish_selection_gesture(false, None);
+
+        let outcome = interaction.handle_event(key_a_pressed(), Viewport::default());
+        assert_eq!(
+            interaction.frame().editor.expect("editor").tool,
+            Tool::Arrow
+        );
+        assert!(outcome.redraw);
+
+        drag(&mut interaction, (200, 220), (320, 220));
+        drag(&mut interaction, (400, 400), (400, 400));
+
+        assert_eq!(interaction.output_snapshot().annotations.len(), 1);
+        assert!(matches!(
+            interaction.output_snapshot().annotations[0].shape,
+            Shape::Arrow((200, 220), (320, 220))
+        ));
+    }
+
+    #[test]
     fn close_event_is_an_exclusive_terminal_outcome() {
         let mut interaction = interaction();
         let outcome = interaction.handle_event(WindowEvent::CloseRequested, Viewport::default());
         assert!(matches!(outcome.command, Some(CaptureCommand::Close)));
         assert!(!outcome.redraw);
         assert!(outcome.ime.is_none());
+    }
+
+    #[test]
+    fn right_click_cancels_selecting_and_editing_sessions() {
+        let viewport = Viewport::default();
+        let mut selecting = interaction();
+        let selecting_outcome = selecting.handle_event(right_button_released((20, 20)), viewport);
+        assert!(matches!(
+            selecting_outcome.command,
+            Some(CaptureCommand::Close)
+        ));
+
+        let mut editing = interaction();
+        enter_editing(&mut editing);
+        editing.start_shape((20, 20));
+        let editing_outcome = editing.handle_event(right_button_released((20, 20)), viewport);
+        assert!(matches!(
+            editing_outcome.command,
+            Some(CaptureCommand::Close)
+        ));
     }
 
     #[test]

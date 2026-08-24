@@ -4,6 +4,9 @@ use crate::app::windows_adapter::gdi_render_text_rgba;
 use xcap::image::{Rgba, RgbaImage};
 
 pub(super) const ANNOT_LINE_T: i32 = 1;
+pub(super) const ARROW_HEAD_LENGTH: f64 = 12.0;
+const ARROW_HEAD_COS: f64 = 0.866_025_403_784_438_6;
+const ARROW_HEAD_SIN: f64 = 0.5;
 pub(super) const MOSAIC_BLOCK_SIZE: i32 = 12;
 
 pub(super) trait TextRasterizer {
@@ -223,6 +226,14 @@ fn render_annotations(
             Shape::Line(a, b) => {
                 target.draw_line(translate(*a), translate(*b), annotation.color, ANNOT_LINE_T)
             }
+            Shape::Arrow(a, b) => {
+                let start = translate(*a);
+                let end = translate(*b);
+                target.draw_line(start, end, annotation.color, ANNOT_LINE_T);
+                let (left, right) = arrow_head_points(start, end);
+                target.draw_line(end, left, annotation.color, ANNOT_LINE_T);
+                target.draw_line(end, right, annotation.color, ANNOT_LINE_T);
+            }
             Shape::Rect(a, b) => {
                 target.draw_rect(translate(*a), translate(*b), annotation.color, 3)
             }
@@ -235,6 +246,21 @@ fn render_annotations(
         }
     }
     Ok(())
+}
+
+fn arrow_head_points(start: (i32, i32), end: (i32, i32)) -> ((i32, i32), (i32, i32)) {
+    let dx = f64::from(start.0 - end.0);
+    let dy = f64::from(start.1 - end.1);
+    let length = dx.hypot(dy);
+    debug_assert!(length > 0.0);
+    let ux = dx / length;
+    let uy = dy / length;
+    let wing = |sin: f64| {
+        let x = f64::from(end.0) + ARROW_HEAD_LENGTH * (ux * ARROW_HEAD_COS - uy * sin);
+        let y = f64::from(end.1) + ARROW_HEAD_LENGTH * (ux * sin + uy * ARROW_HEAD_COS);
+        (x.round() as i32, y.round() as i32)
+    };
+    (wing(ARROW_HEAD_SIN), wing(-ARROW_HEAD_SIN))
 }
 
 struct ImageTarget<'a>(&'a mut RgbaImage);

@@ -4,6 +4,66 @@ use super::output::{Annotation, Shape};
 use super::windows_adapter::{TEXT_FONT_HEIGHT, gdi_render_text_rgba, gdi_text_size};
 use xcap::image::RgbaImage;
 
+const TOOLBAR_ICON_SIZE: i32 = 20;
+const ICON_PEN: &[u8; 400] = include_bytes!("../../assets/icons/remix/pen.alpha");
+const ICON_LINE: &[u8; 400] = include_bytes!("../../assets/icons/remix/line.alpha");
+const ICON_ARROW: &[u8; 400] = include_bytes!("../../assets/icons/remix/arrow.alpha");
+const ICON_RECT: &[u8; 400] = include_bytes!("../../assets/icons/remix/rect.alpha");
+const ICON_MOSAIC: &[u8; 400] = include_bytes!("../../assets/icons/remix/mosaic.alpha");
+const ICON_TEXT: &[u8; 400] = include_bytes!("../../assets/icons/remix/text.alpha");
+const ICON_COLOR: &[u8; 400] = include_bytes!("../../assets/icons/remix/color.alpha");
+const ICON_UNDO: &[u8; 400] = include_bytes!("../../assets/icons/remix/undo.alpha");
+const ICON_COPY: &[u8; 400] = include_bytes!("../../assets/icons/remix/copy.alpha");
+const ICON_OCR: &[u8; 400] = include_bytes!("../../assets/icons/remix/ocr.alpha");
+const ICON_PIN: &[u8; 400] = include_bytes!("../../assets/icons/remix/pin.alpha");
+const ICON_RESELECT: &[u8; 400] = include_bytes!("../../assets/icons/remix/reselect.alpha");
+const ICON_CLOSE: &[u8; 400] = include_bytes!("../../assets/icons/remix/close.alpha");
+
+pub(super) fn toolbar_icon_alpha(item: ToolbarItem) -> &'static [u8; 400] {
+    match item {
+        ToolbarItem::Tool(Tool::Pen) => ICON_PEN,
+        ToolbarItem::Tool(Tool::Line) => ICON_LINE,
+        ToolbarItem::Tool(Tool::Arrow) => ICON_ARROW,
+        ToolbarItem::Tool(Tool::Rect) => ICON_RECT,
+        ToolbarItem::Tool(Tool::Mosaic) => ICON_MOSAIC,
+        ToolbarItem::Tool(Tool::Text) => ICON_TEXT,
+        ToolbarItem::Color => ICON_COLOR,
+        ToolbarItem::Action(ToolbarAction::Undo) => ICON_UNDO,
+        ToolbarItem::Action(ToolbarAction::Copy) => ICON_COPY,
+        ToolbarItem::Action(ToolbarAction::Ocr) => ICON_OCR,
+        ToolbarItem::Action(ToolbarAction::Pin) => ICON_PIN,
+        ToolbarItem::Action(ToolbarAction::Reselect) => ICON_RESELECT,
+        ToolbarItem::Action(ToolbarAction::Close) => ICON_CLOSE,
+    }
+}
+
+fn draw_toolbar_icon(
+    buf: &mut [u32],
+    w: u32,
+    h: u32,
+    rect: (i32, i32, i32, i32),
+    item: ToolbarItem,
+) {
+    let left = rect.0 + (rect.2 - rect.0 - TOOLBAR_ICON_SIZE) / 2;
+    let top = rect.1 + (rect.3 - rect.1 - TOOLBAR_ICON_SIZE) / 2;
+    for (index, alpha) in toolbar_icon_alpha(item).iter().copied().enumerate() {
+        if alpha == 0 {
+            continue;
+        }
+        let x = left + index as i32 % TOOLBAR_ICON_SIZE;
+        let y = top + index as i32 / TOOLBAR_ICON_SIZE;
+        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+            continue;
+        }
+        let pixel = &mut buf[(y as u32 * w + x as u32) as usize];
+        let inverse = 255 - u32::from(alpha);
+        let red = ((*pixel >> 16 & 0xff) * inverse + 255 * u32::from(alpha)) / 255;
+        let green = ((*pixel >> 8 & 0xff) * inverse + 255 * u32::from(alpha)) / 255;
+        let blue = ((*pixel & 0xff) * inverse + 255 * u32::from(alpha)) / 255;
+        *pixel = red << 16 | green << 8 | blue;
+    }
+}
+
 /// 把 RGBA 图像铺进 softbuffer 的 0RGB 缓冲。窗口大于图像时，多余区域清黑。
 pub(super) fn blit_rgba_image(
     buffer: &mut [u32],
@@ -215,31 +275,7 @@ pub(super) fn draw_toolbar(
                 }
             }
             _ => {
-                let label = match item {
-                    ToolbarItem::Tool(Tool::Pen) => "PEN",
-                    ToolbarItem::Tool(Tool::Line) => "LINE",
-                    ToolbarItem::Tool(Tool::Rect) => "RECT",
-                    ToolbarItem::Tool(Tool::Mosaic) => "MOSAIC",
-                    ToolbarItem::Tool(Tool::Text) => "TEXT",
-                    ToolbarItem::Action(ToolbarAction::Copy) => "COPY",
-                    ToolbarItem::Action(ToolbarAction::Ocr) => "OCR",
-                    ToolbarItem::Action(ToolbarAction::Reselect) => "SELECT",
-                    ToolbarItem::Action(ToolbarAction::Pin) => "PIN",
-                    ToolbarItem::Action(ToolbarAction::Undo) => "UNDO",
-                    ToolbarItem::Action(ToolbarAction::Close) => "X",
-                    _ => "",
-                };
-                let text_width = (label.chars().count() as i32 * 12) - 2;
-                draw_text(
-                    buf,
-                    w,
-                    h,
-                    rect.0 + (rect.2 - rect.0 - text_width) / 2,
-                    rect.1 + 10,
-                    label,
-                    2,
-                    0x00FFFFFF,
-                );
+                draw_toolbar_icon(buf, w, h, rect, item);
             }
         }
     }
@@ -392,6 +428,9 @@ pub(super) fn glyph(ch: char) -> [u8; 7] {
         ],
         'R' => [
             0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
         ],
         _ => [0; 7],
     }

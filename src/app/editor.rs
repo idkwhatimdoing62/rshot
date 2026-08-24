@@ -7,6 +7,7 @@ pub(super) enum Tool {
     #[default]
     Pen,
     Line,
+    Arrow,
     Rect,
     Mosaic,
     Text,
@@ -84,6 +85,7 @@ impl EditorState {
         let shape = match self.tool {
             Tool::Pen => Shape::Pen(vec![point]),
             Tool::Line => Shape::Line(point, point),
+            Tool::Arrow => Shape::Arrow(point, point),
             Tool::Rect => Shape::Rect(point, point),
             Tool::Mosaic => Shape::Mosaic(point, point),
             Tool::Text => return,
@@ -100,7 +102,10 @@ impl EditorState {
         };
         match &mut annotation.shape {
             Shape::Pen(points) => points.push(point),
-            Shape::Line(_, end) | Shape::Rect(_, end) | Shape::Mosaic(_, end) => *end = point,
+            Shape::Line(_, end)
+            | Shape::Arrow(_, end)
+            | Shape::Rect(_, end)
+            | Shape::Mosaic(_, end) => *end = point,
             Shape::Text(..) => {}
         }
     }
@@ -111,7 +116,9 @@ impl EditorState {
         };
         let (drop, dot) = match &annotation.shape {
             Shape::Pen(points) => (false, points.len() == 1),
-            Shape::Line(start, end) | Shape::Rect(start, end) => (start == end, false),
+            Shape::Line(start, end) | Shape::Arrow(start, end) | Shape::Rect(start, end) => {
+                (start == end, false)
+            }
             Shape::Mosaic(start, end) => (start.0 == end.0 || start.1 == end.1, false),
             Shape::Text(..) => (false, false),
         };
@@ -239,15 +246,15 @@ impl EditorState {
 }
 
 pub(super) const TOOLBAR_HEIGHT: i32 = 38;
-pub(super) const TOOLBAR_GAP: i32 = 1;
+pub(super) const TOOLBAR_GAP: i32 = 3;
 pub(super) const SWATCH: i32 = 26; // 色板色块边长
 pub(super) const SWATCH_GAP: i32 = 4;
 pub(super) const PALETTE_PAD: i32 = 6; // 色板弹层内边距
 
-// 单行工具栏：PEN / LINE / RECT / MOSAIC / TEXT / COLOR / UNDO / COPY / OCR / PIN / SELECT / X
-pub(super) const TOOLBAR_ITEM_WIDTHS: [i32; 12] = [46, 50, 50, 74, 50, 44, 50, 50, 42, 44, 74, 30];
-pub(super) const TOOLBAR_SLOT_COUNT: usize = 12;
-pub(super) const TOOLBAR_SLOT_COLOR: usize = 5;
+// 单行工具栏：PEN / LINE / ARROW / RECT / MOSAIC / TEXT / COLOR / UNDO / COPY / OCR / PIN / SELECT / X
+pub(super) const TOOLBAR_ITEM_WIDTHS: [i32; 13] = [34; 13];
+pub(super) const TOOLBAR_SLOT_COUNT: usize = 13;
+pub(super) const TOOLBAR_SLOT_COLOR: usize = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ToolbarItem {
@@ -271,15 +278,16 @@ pub(super) fn toolbar_item(slot: usize) -> ToolbarItem {
     match slot {
         0 => ToolbarItem::Tool(Tool::Pen),
         1 => ToolbarItem::Tool(Tool::Line),
-        2 => ToolbarItem::Tool(Tool::Rect),
-        3 => ToolbarItem::Tool(Tool::Mosaic),
-        4 => ToolbarItem::Tool(Tool::Text),
-        5 => ToolbarItem::Color,
-        6 => ToolbarItem::Action(ToolbarAction::Undo),
-        7 => ToolbarItem::Action(ToolbarAction::Copy),
-        8 => ToolbarItem::Action(ToolbarAction::Ocr),
-        9 => ToolbarItem::Action(ToolbarAction::Pin),
-        10 => ToolbarItem::Action(ToolbarAction::Reselect),
+        2 => ToolbarItem::Tool(Tool::Arrow),
+        3 => ToolbarItem::Tool(Tool::Rect),
+        4 => ToolbarItem::Tool(Tool::Mosaic),
+        5 => ToolbarItem::Tool(Tool::Text),
+        6 => ToolbarItem::Color,
+        7 => ToolbarItem::Action(ToolbarAction::Undo),
+        8 => ToolbarItem::Action(ToolbarAction::Copy),
+        9 => ToolbarItem::Action(ToolbarAction::Ocr),
+        10 => ToolbarItem::Action(ToolbarAction::Pin),
+        11 => ToolbarItem::Action(ToolbarAction::Reselect),
         _ => ToolbarItem::Action(ToolbarAction::Close),
     }
 }
@@ -288,22 +296,24 @@ pub(super) fn toolbar_item_slot(item: ToolbarItem) -> usize {
     match item {
         ToolbarItem::Tool(Tool::Pen) => 0,
         ToolbarItem::Tool(Tool::Line) => 1,
-        ToolbarItem::Tool(Tool::Rect) => 2,
-        ToolbarItem::Tool(Tool::Mosaic) => 3,
-        ToolbarItem::Tool(Tool::Text) => 4,
-        ToolbarItem::Color => 5,
-        ToolbarItem::Action(ToolbarAction::Undo) => 6,
-        ToolbarItem::Action(ToolbarAction::Copy) => 7,
-        ToolbarItem::Action(ToolbarAction::Ocr) => 8,
-        ToolbarItem::Action(ToolbarAction::Pin) => 9,
-        ToolbarItem::Action(ToolbarAction::Reselect) => 10,
-        ToolbarItem::Action(ToolbarAction::Close) => 11,
+        ToolbarItem::Tool(Tool::Arrow) => 2,
+        ToolbarItem::Tool(Tool::Rect) => 3,
+        ToolbarItem::Tool(Tool::Mosaic) => 4,
+        ToolbarItem::Tool(Tool::Text) => 5,
+        ToolbarItem::Color => 6,
+        ToolbarItem::Action(ToolbarAction::Undo) => 7,
+        ToolbarItem::Action(ToolbarAction::Copy) => 8,
+        ToolbarItem::Action(ToolbarAction::Ocr) => 9,
+        ToolbarItem::Action(ToolbarAction::Pin) => 10,
+        ToolbarItem::Action(ToolbarAction::Reselect) => 11,
+        ToolbarItem::Action(ToolbarAction::Close) => 12,
     }
 }
 
 pub(super) fn toolbar_size() -> (i32, i32) {
-    let w = TOOLBAR_ITEM_WIDTHS.iter().sum::<i32>() + TOOLBAR_GAP * (TOOLBAR_SLOT_COUNT as i32 - 1);
-    (w, TOOLBAR_HEIGHT)
+    let width =
+        TOOLBAR_ITEM_WIDTHS.iter().sum::<i32>() + TOOLBAR_GAP * (TOOLBAR_SLOT_COUNT as i32 - 1);
+    (width, TOOLBAR_HEIGHT)
 }
 
 pub(super) fn toolbar_origin(w: i32, h: i32, sel: Option<((i32, i32), (i32, i32))>) -> (i32, i32) {
