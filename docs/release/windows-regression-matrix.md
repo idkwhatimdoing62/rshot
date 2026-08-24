@@ -36,6 +36,7 @@
 | C-05 | Two displays with mixed scale and negative coordinates | No offset, crop or diagonal corruption | | |
 | C-06 | Chinese and English IME text annotation | Preedit, commit, backspace and caret behave correctly | | |
 | C-07 | Mosaic annotation | Multiple rectangular regions preview live; zero-area clicks create nothing; Undo removes the newest region; copy and pin match the preview; ordinary annotations render above mosaic | | |
+| C-08 | Arrow annotation and compact toolbar | Arrow direction, zero-length behavior, Undo, copy and pin match the preview; every icon is recognizable and separately clickable; right-click cancels selection and editing | | |
 
 ## Pins
 
