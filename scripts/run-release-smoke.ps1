@@ -1,9 +1,12 @@
 [CmdletBinding()]
 param(
-    [string]$Executable = "$(Join-Path $PSScriptRoot '..\target\release\rshot.exe')"
+    [string]$Executable
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($Executable)) {
+    $Executable = Join-Path $PSScriptRoot '..\target\release\rshot.exe'
+}
 $resolvedExecutable = (Resolve-Path -LiteralPath $Executable).Path
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 

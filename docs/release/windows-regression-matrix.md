@@ -35,6 +35,7 @@
 | C-04 | Two displays with equal scale | Cursor display is captured and overlay matches it | | |
 | C-05 | Two displays with mixed scale and negative coordinates | No offset, crop or diagonal corruption | | |
 | C-06 | Chinese and English IME text annotation | Preedit, commit, backspace and caret behave correctly | | |
+| C-07 | Mosaic annotation | Multiple rectangular regions preview live; zero-area clicks create nothing; Undo removes the newest region; copy and pin match the preview; ordinary annotations render above mosaic | | |
 
 ## Pins
 
