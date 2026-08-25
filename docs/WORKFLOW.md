@@ -8,7 +8,7 @@ This repository separates durable facts from the temporary process used to chang
 | --- | --- |
 | User-facing entry points | `README.md` |
 | Domain vocabulary | `docs/CONTEXT.md` |
-| Current system behavior and structure | `docs/DESIGN.md` |
+| Current system behavior and structure | `docs/ARCHITECTURE.md` |
 | Accepted architecture decisions and tradeoffs | `docs/adr/` |
 | Release policy | `docs/RELEASE.md` |
 | Version history | `CHANGELOG.md` |
@@ -30,7 +30,7 @@ Owner Docs describe the accepted current state. GitHub Issues describe how a pro
 
 - Acceptance criteria are either verified or explicitly moved to a linked follow-up Issue.
 - Required quality commands pass, with interactive gaps linked to a `ready-for-human` Issue.
-- `README.md`, `docs/CONTEXT.md`, `docs/DESIGN.md`, `docs/RELEASE.md` and `CHANGELOG.md` were checked where relevant.
+- `README.md`, `docs/CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/RELEASE.md` and `CHANGELOG.md` were checked where relevant.
 - Lasting decisions are recorded in `docs/adr/`; superseded ADRs link to their replacements.
 - Discoveries and remaining work are written in the Issue.
 - The final Issue comment links the merged change and states what was verified.
