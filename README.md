@@ -74,7 +74,7 @@ cargo build --release
 
 更详细的信息：
 
-- [设计与行为约束](docs/DESIGN.md)
+- [系统架构与行为](docs/ARCHITECTURE.md)
 - [发布、升级和回退](docs/RELEASE.md)
 - [版本记录](CHANGELOG.md)
 - [第三方组件与许可证](THIRD_PARTY_NOTICES.md)
