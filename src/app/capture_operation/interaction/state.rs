@@ -18,7 +18,7 @@ pub(in crate::app::capture_operation) struct EditingState {
 
 pub(in crate::app::capture_operation) enum InteractionPhase {
     Selecting(SelectingState),
-    Editing(EditingState),
+    Editing(Box<EditingState>),
 }
 
 pub(in crate::app::capture_operation) struct Interaction {
@@ -30,6 +30,7 @@ pub(in crate::app::capture_operation) struct Interaction {
     pub(super) modifiers: ModifiersState,
     pub(super) revision: u64,
     pub(super) last_blink: Option<Instant>,
+    pub(super) last_select_click: Option<(Instant, usize, (i32, i32))>,
     pub(super) preferred_tool: Tool,
     pub(super) preferred_color: [u8; 4],
     pub(super) metrics: Box<dyn TextMetrics>,
@@ -57,6 +58,7 @@ impl Interaction {
             modifiers: ModifiersState::default(),
             revision: 0,
             last_blink: None,
+            last_select_click: None,
             preferred_tool: Tool::Pen,
             preferred_color: PALETTE[0],
             metrics,

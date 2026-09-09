@@ -11,6 +11,7 @@ pub(super) enum Tool {
     Rect,
     Mosaic,
     Text,
+    Select,
 }
 
 /// 一条标注的形状：自由画笔（一串点）/ 直线（两点）/ 矩形（两对角点）/ 文字（左上角锚点 + 内容）。
@@ -41,7 +42,45 @@ pub(super) struct EditorState {
     pub(super) ime_preedit: String,
     pub(super) cursor_visible: bool,
     pub(super) caret_byte: usize,
+    pub(super) selected: Option<usize>,
+    text_edit_index: Option<usize>,
+    undo_stack: Vec<HistoryEntry>,
+    redo_stack: Vec<HistoryEntry>,
+    pending_before: Option<Vec<Annotation>>,
+    transform: Option<TransformGesture>,
 }
+
+#[derive(Clone)]
+struct HistoryEntry {
+    before: Vec<Annotation>,
+    after: Vec<Annotation>,
+}
+
+#[derive(Clone)]
+struct TransformGesture {
+    index: usize,
+    start: (i32, i32),
+    original: Annotation,
+    kind: TransformKind,
+}
+
+#[derive(Clone, Copy)]
+enum TransformKind {
+    Body,
+    Start,
+    End,
+    Corner(RectCorner),
+}
+
+#[derive(Clone, Copy)]
+enum RectCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+const HISTORY_LIMIT: usize = 100;
 
 impl Default for EditorState {
     fn default() -> Self {
@@ -59,26 +98,202 @@ impl Default for EditorState {
             ime_preedit: String::new(),
             cursor_visible: true,
             caret_byte: 0,
+            selected: None,
+            text_edit_index: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pending_before: None,
+            transform: None,
         }
     }
 }
 
 impl EditorState {
+    pub(super) fn with_preferences(tool: Tool, color: [u8; 4]) -> Self {
+        Self {
+            tool,
+            color,
+            ..Self::default()
+        }
+    }
+
+    fn begin_change(&mut self) {
+        if self.pending_before.is_none() {
+            self.pending_before = Some(self.annotations.clone());
+        }
+    }
+
+    fn finish_change(&mut self) -> bool {
+        let Some(before) = self.pending_before.take() else {
+            return false;
+        };
+        if before == self.annotations {
+            return false;
+        }
+        if self.undo_stack.len() == HISTORY_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(HistoryEntry {
+            before,
+            after: self.annotations.clone(),
+        });
+        self.redo_stack.clear();
+        true
+    }
+
+    pub(super) fn undo(&mut self) -> bool {
+        let Some(entry) = self.undo_stack.pop() else {
+            return false;
+        };
+        self.pending_before = None;
+        self.transform = None;
+        self.selected = None;
+        self.annotations.clone_from(&entry.before);
+        self.redo_stack.push(entry);
+        true
+    }
+
+    pub(super) fn redo(&mut self) -> bool {
+        let Some(entry) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.pending_before = None;
+        self.transform = None;
+        self.selected = None;
+        self.annotations.clone_from(&entry.after);
+        self.undo_stack.push(entry);
+        true
+    }
+
+    pub(super) fn select_at(
+        &mut self,
+        point: (i32, i32),
+        measure_text: impl Fn(&str) -> (i32, i32),
+    ) -> Option<usize> {
+        let ordinary = self
+            .annotations
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, annotation)| !matches!(annotation.shape, Shape::Mosaic(..)));
+        let mosaics = self
+            .annotations
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, annotation)| matches!(annotation.shape, Shape::Mosaic(..)));
+        self.selected = ordinary.chain(mosaics).find_map(|(index, annotation)| {
+            annotation_hit(annotation, point, &measure_text).then_some(index)
+        });
+        self.selected
+    }
+
+    pub(super) fn begin_transform_at(&mut self, point: (i32, i32)) -> bool {
+        let Some(index) = self.selected else {
+            return false;
+        };
+        let Some(original) = self.annotations.get(index).cloned() else {
+            return false;
+        };
+        let kind = transform_handle(&original.shape, point).unwrap_or(TransformKind::Body);
+        self.begin_change();
+        self.transform = Some(TransformGesture {
+            index,
+            start: point,
+            original,
+            kind,
+        });
+        true
+    }
+
+    pub(super) fn update_transform(&mut self, point: (i32, i32)) -> bool {
+        let Some(gesture) = &self.transform else {
+            return false;
+        };
+        let Some(annotation) = self.annotations.get_mut(gesture.index) else {
+            return false;
+        };
+        *annotation = gesture.original.clone();
+        match gesture.kind {
+            TransformKind::Body => translate_shape(
+                &mut annotation.shape,
+                (point.0 - gesture.start.0, point.1 - gesture.start.1),
+            ),
+            TransformKind::Start => match &mut annotation.shape {
+                Shape::Line(start, _) | Shape::Arrow(start, _) => *start = point,
+                _ => {}
+            },
+            TransformKind::End => match &mut annotation.shape {
+                Shape::Line(_, end) | Shape::Arrow(_, end) => *end = point,
+                _ => {}
+            },
+            TransformKind::Corner(corner) => match &mut annotation.shape {
+                Shape::Rect(start, end) | Shape::Mosaic(start, end) => {
+                    let (left, top, right, bottom) = normalized_rect((*start, *end));
+                    let opposite = match corner {
+                        RectCorner::TopLeft => (right, bottom),
+                        RectCorner::TopRight => (left, bottom),
+                        RectCorner::BottomLeft => (right, top),
+                        RectCorner::BottomRight => (left, top),
+                    };
+                    let normalized = normalized_rect((point, opposite));
+                    *start = (normalized.0, normalized.1);
+                    *end = (normalized.2, normalized.3);
+                }
+                _ => {}
+            },
+        }
+        true
+    }
+
+    pub(super) fn commit_transform(&mut self) -> bool {
+        if self.transform.take().is_none() {
+            return false;
+        }
+        self.finish_change()
+    }
+
     pub(super) fn close_palette(&mut self) {
         self.palette_open = false;
         self.palette_hover = None;
         self.palette_pressed = None;
     }
 
-    pub(super) fn set_color(&mut self, index: usize) {
+    pub(super) fn set_color(&mut self, index: usize) -> bool {
         let color = PALETTE[index];
         self.color = color;
-        if self.text_editing
-            && let Some(last) = self.annotations.last_mut()
-            && matches!(last.shape, Shape::Text(..))
+        if self.text_editing {
+            if let Some(annotation) = self
+                .text_edit_index
+                .and_then(|index| self.annotations.get_mut(index))
+                && annotation.color != color
+            {
+                annotation.color = color;
+                return true;
+            }
+        } else if let Some(index) = self.selected
+            && self
+                .annotations
+                .get(index)
+                .is_some_and(|annotation| annotation.color != color)
         {
-            last.color = color;
+            self.begin_change();
+            self.annotations[index].color = color;
+            return self.finish_change();
         }
+        false
+    }
+
+    pub(super) fn delete_selected(&mut self) -> bool {
+        let Some(index) = self.selected.take() else {
+            return false;
+        };
+        if index >= self.annotations.len() {
+            return false;
+        }
+        self.begin_change();
+        self.annotations.remove(index);
+        self.finish_change()
     }
 
     pub(super) fn start_shape(&mut self, point: (i32, i32)) {
@@ -88,8 +303,10 @@ impl EditorState {
             Tool::Arrow => Shape::Arrow(point, point),
             Tool::Rect => Shape::Rect(point, point),
             Tool::Mosaic => Shape::Mosaic(point, point),
-            Tool::Text => return,
+            Tool::Text | Tool::Select => return,
         };
+        self.selected = None;
+        self.begin_change();
         self.annotations.push(Annotation {
             shape,
             color: self.color,
@@ -129,14 +346,18 @@ impl EditorState {
         {
             points.push(points[0]);
         }
+        self.finish_change();
     }
 
     pub(super) fn start_text(&mut self, point: (i32, i32)) {
         self.commit_text();
+        self.begin_change();
         self.annotations.push(Annotation {
             shape: Shape::Text(point, String::new()),
             color: self.color,
         });
+        self.text_edit_index = Some(self.annotations.len() - 1);
+        self.selected = None;
         self.text_editing = true;
         self.ime_preedit.clear();
         self.cursor_visible = true;
@@ -145,7 +366,11 @@ impl EditorState {
 
     pub(super) fn insert_text(&mut self, value: &str) -> bool {
         let caret = self.caret_byte;
-        let Some(Shape::Text(_, text)) = self.annotations.last_mut().map(|a| &mut a.shape) else {
+        let Some(Shape::Text(_, text)) = self
+            .text_edit_index
+            .and_then(|index| self.annotations.get_mut(index))
+            .map(|a| &mut a.shape)
+        else {
             return false;
         };
         text.insert_str(caret, value);
@@ -157,7 +382,11 @@ impl EditorState {
         if self.caret_byte == 0 {
             return false;
         }
-        let Some(Shape::Text(_, text)) = self.annotations.last_mut().map(|a| &mut a.shape) else {
+        let Some(Shape::Text(_, text)) = self
+            .text_edit_index
+            .and_then(|index| self.annotations.get_mut(index))
+            .map(|a| &mut a.shape)
+        else {
             return false;
         };
         let previous = text[..self.caret_byte]
@@ -171,7 +400,11 @@ impl EditorState {
     }
 
     pub(super) fn move_caret_left(&mut self) {
-        if let Some(Shape::Text(_, text)) = self.annotations.last().map(|a| &a.shape) {
+        if let Some(Shape::Text(_, text)) = self
+            .text_edit_index
+            .and_then(|index| self.annotations.get(index))
+            .map(|a| &a.shape)
+        {
             self.caret_byte = text[..self.caret_byte]
                 .char_indices()
                 .next_back()
@@ -181,7 +414,10 @@ impl EditorState {
     }
 
     pub(super) fn move_caret_right(&mut self) {
-        if let Some(Shape::Text(_, text)) = self.annotations.last().map(|a| &a.shape)
+        if let Some(Shape::Text(_, text)) = self
+            .text_edit_index
+            .and_then(|index| self.annotations.get(index))
+            .map(|a| &a.shape)
             && self.caret_byte < text.len()
         {
             self.caret_byte += text[self.caret_byte..]
@@ -194,7 +430,11 @@ impl EditorState {
 
     pub(super) fn remove_before_caret_if_matches(&mut self, value: &str) -> bool {
         let count = value.chars().count();
-        let Some(Shape::Text(_, text)) = self.annotations.last_mut().map(|a| &mut a.shape) else {
+        let Some(Shape::Text(_, text)) = self
+            .text_edit_index
+            .and_then(|index| self.annotations.get_mut(index))
+            .map(|a| &mut a.shape)
+        else {
             return false;
         };
         let start = text[..self.caret_byte]
@@ -217,13 +457,14 @@ impl EditorState {
         self.text_editing = false;
         self.ime_preedit.clear();
         self.caret_byte = 0;
-        if self
-            .annotations
-            .last()
-            .is_some_and(|last| matches!(&last.shape, Shape::Text(_, text) if text.is_empty()))
+        if let Some(index) = self.text_edit_index.take()
+            && self.annotations.get(index).is_some_and(
+                |annotation| matches!(&annotation.shape, Shape::Text(_, text) if text.is_empty()),
+            )
         {
-            self.annotations.pop();
+            self.annotations.remove(index);
         }
+        self.finish_change();
         true
     }
 
@@ -234,14 +475,131 @@ impl EditorState {
         self.text_editing = false;
         self.ime_preedit.clear();
         self.caret_byte = 0;
-        if self
-            .annotations
-            .last()
-            .is_some_and(|last| matches!(last.shape, Shape::Text(..)))
-        {
-            self.annotations.pop();
+        self.text_edit_index = None;
+        if let Some(before) = self.pending_before.take() {
+            self.annotations = before;
         }
         true
+    }
+
+    pub(super) fn reopen_selected_text(&mut self) -> bool {
+        let Some(index) = self.selected else {
+            return false;
+        };
+        let Some(Shape::Text(_, text)) = self.annotations.get(index).map(|a| &a.shape) else {
+            return false;
+        };
+        let caret = text.len();
+        self.begin_change();
+        self.text_edit_index = Some(index);
+        self.text_editing = true;
+        self.ime_preedit.clear();
+        self.cursor_visible = true;
+        self.caret_byte = caret;
+        true
+    }
+
+    pub(super) fn text_annotation(&self) -> Option<&Annotation> {
+        self.text_edit_index
+            .and_then(|index| self.annotations.get(index))
+    }
+}
+
+fn translate_point(point: &mut (i32, i32), delta: (i32, i32)) {
+    point.0 += delta.0;
+    point.1 += delta.1;
+}
+
+fn translate_shape(shape: &mut Shape, delta: (i32, i32)) {
+    match shape {
+        Shape::Pen(points) => {
+            for point in points {
+                translate_point(point, delta);
+            }
+        }
+        Shape::Line(start, end)
+        | Shape::Arrow(start, end)
+        | Shape::Rect(start, end)
+        | Shape::Mosaic(start, end) => {
+            translate_point(start, delta);
+            translate_point(end, delta);
+        }
+        Shape::Text(point, _) => translate_point(point, delta),
+    }
+}
+
+fn point_near_segment(point: (i32, i32), start: (i32, i32), end: (i32, i32)) -> bool {
+    const TOLERANCE: f64 = 6.0;
+    let (px, py) = (f64::from(point.0), f64::from(point.1));
+    let (ax, ay) = (f64::from(start.0), f64::from(start.1));
+    let (bx, by) = (f64::from(end.0), f64::from(end.1));
+    let (dx, dy) = (bx - ax, by - ay);
+    let length_squared = dx * dx + dy * dy;
+    let t = if length_squared == 0.0 {
+        0.0
+    } else {
+        (((px - ax) * dx + (py - ay) * dy) / length_squared).clamp(0.0, 1.0)
+    };
+    let (nearest_x, nearest_y) = (ax + t * dx, ay + t * dy);
+    (px - nearest_x).hypot(py - nearest_y) <= TOLERANCE
+}
+
+fn point_near_handle(point: (i32, i32), handle: (i32, i32)) -> bool {
+    const HANDLE_TOLERANCE: i32 = 7;
+    (point.0 - handle.0).abs() <= HANDLE_TOLERANCE && (point.1 - handle.1).abs() <= HANDLE_TOLERANCE
+}
+
+fn transform_handle(shape: &Shape, point: (i32, i32)) -> Option<TransformKind> {
+    match shape {
+        Shape::Line(start, end) | Shape::Arrow(start, end) => {
+            if point_near_handle(point, *start) {
+                Some(TransformKind::Start)
+            } else if point_near_handle(point, *end) {
+                Some(TransformKind::End)
+            } else {
+                None
+            }
+        }
+        Shape::Rect(start, end) | Shape::Mosaic(start, end) => {
+            let (left, top, right, bottom) = normalized_rect((*start, *end));
+            [
+                ((left, top), RectCorner::TopLeft),
+                ((right, top), RectCorner::TopRight),
+                ((left, bottom), RectCorner::BottomLeft),
+                ((right, bottom), RectCorner::BottomRight),
+            ]
+            .into_iter()
+            .find_map(|(handle, corner)| {
+                point_near_handle(point, handle).then_some(TransformKind::Corner(corner))
+            })
+        }
+        Shape::Pen(..) | Shape::Text(..) => None,
+    }
+}
+
+fn annotation_hit(
+    annotation: &Annotation,
+    point: (i32, i32),
+    measure_text: &impl Fn(&str) -> (i32, i32),
+) -> bool {
+    match &annotation.shape {
+        Shape::Pen(points) => points
+            .windows(2)
+            .any(|pair| point_near_segment(point, pair[0], pair[1])),
+        Shape::Line(start, end) | Shape::Arrow(start, end) => {
+            point_near_segment(point, *start, *end)
+        }
+        Shape::Rect(start, end) | Shape::Mosaic(start, end) => {
+            let (left, top, right, bottom) = normalized_rect((*start, *end));
+            point.0 >= left && point.0 <= right && point.1 >= top && point.1 <= bottom
+        }
+        Shape::Text(origin, text) => {
+            let (width, height) = measure_text(text);
+            point.0 >= origin.0
+                && point.0 <= origin.0 + width.max(4)
+                && point.1 >= origin.1
+                && point.1 <= origin.1 + height.max(4)
+        }
     }
 }
 
@@ -252,9 +610,9 @@ pub(super) const SWATCH_GAP: i32 = 4;
 pub(super) const PALETTE_PAD: i32 = 6; // 色板弹层内边距
 
 // 单行工具栏：PEN / LINE / ARROW / RECT / MOSAIC / TEXT / COLOR / UNDO / COPY / OCR / PIN / SELECT / X
-pub(super) const TOOLBAR_ITEM_WIDTHS: [i32; 13] = [34; 13];
-pub(super) const TOOLBAR_SLOT_COUNT: usize = 13;
-pub(super) const TOOLBAR_SLOT_COLOR: usize = 6;
+pub(super) const TOOLBAR_ITEM_WIDTHS: [i32; 15] = [34; 15];
+pub(super) const TOOLBAR_SLOT_COUNT: usize = 15;
+pub(super) const TOOLBAR_SLOT_COLOR: usize = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ToolbarItem {
@@ -271,6 +629,7 @@ pub(super) enum ToolbarAction {
     Reselect,
     Pin,
     Undo,
+    Redo,
     Close,
 }
 
@@ -282,12 +641,14 @@ pub(super) fn toolbar_item(slot: usize) -> ToolbarItem {
         3 => ToolbarItem::Tool(Tool::Rect),
         4 => ToolbarItem::Tool(Tool::Mosaic),
         5 => ToolbarItem::Tool(Tool::Text),
-        6 => ToolbarItem::Color,
-        7 => ToolbarItem::Action(ToolbarAction::Undo),
-        8 => ToolbarItem::Action(ToolbarAction::Copy),
-        9 => ToolbarItem::Action(ToolbarAction::Ocr),
-        10 => ToolbarItem::Action(ToolbarAction::Pin),
-        11 => ToolbarItem::Action(ToolbarAction::Reselect),
+        6 => ToolbarItem::Tool(Tool::Select),
+        7 => ToolbarItem::Color,
+        8 => ToolbarItem::Action(ToolbarAction::Undo),
+        9 => ToolbarItem::Action(ToolbarAction::Redo),
+        10 => ToolbarItem::Action(ToolbarAction::Copy),
+        11 => ToolbarItem::Action(ToolbarAction::Ocr),
+        12 => ToolbarItem::Action(ToolbarAction::Pin),
+        13 => ToolbarItem::Action(ToolbarAction::Reselect),
         _ => ToolbarItem::Action(ToolbarAction::Close),
     }
 }
@@ -300,13 +661,15 @@ pub(super) fn toolbar_item_slot(item: ToolbarItem) -> usize {
         ToolbarItem::Tool(Tool::Rect) => 3,
         ToolbarItem::Tool(Tool::Mosaic) => 4,
         ToolbarItem::Tool(Tool::Text) => 5,
-        ToolbarItem::Color => 6,
-        ToolbarItem::Action(ToolbarAction::Undo) => 7,
-        ToolbarItem::Action(ToolbarAction::Copy) => 8,
-        ToolbarItem::Action(ToolbarAction::Ocr) => 9,
-        ToolbarItem::Action(ToolbarAction::Pin) => 10,
-        ToolbarItem::Action(ToolbarAction::Reselect) => 11,
-        ToolbarItem::Action(ToolbarAction::Close) => 12,
+        ToolbarItem::Tool(Tool::Select) => 6,
+        ToolbarItem::Color => 7,
+        ToolbarItem::Action(ToolbarAction::Undo) => 8,
+        ToolbarItem::Action(ToolbarAction::Redo) => 9,
+        ToolbarItem::Action(ToolbarAction::Copy) => 10,
+        ToolbarItem::Action(ToolbarAction::Ocr) => 11,
+        ToolbarItem::Action(ToolbarAction::Pin) => 12,
+        ToolbarItem::Action(ToolbarAction::Reselect) => 13,
+        ToolbarItem::Action(ToolbarAction::Close) => 14,
     }
 }
 
@@ -482,5 +845,149 @@ mod mosaic_editing_tests {
         editor.update_draft((8, 20));
         editor.commit_draft();
         assert!(editor.annotations.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod annotation_history_tests {
+    use super::*;
+
+    #[test]
+    fn committed_gestures_undo_redo_and_clear_redo_on_a_new_edit() {
+        let mut editor = EditorState {
+            tool: Tool::Line,
+            ..EditorState::default()
+        };
+
+        editor.start_shape((10, 10));
+        editor.update_draft((40, 30));
+        editor.commit_draft();
+        assert_eq!(editor.annotations.len(), 1);
+
+        assert!(editor.undo());
+        assert!(editor.annotations.is_empty());
+        assert!(editor.redo());
+        assert_eq!(editor.annotations.len(), 1);
+
+        assert!(editor.undo());
+        editor.start_shape((5, 5));
+        editor.update_draft((20, 20));
+        editor.commit_draft();
+        assert!(!editor.redo());
+        assert!(matches!(
+            editor.annotations.as_slice(),
+            [Annotation {
+                shape: Shape::Line((5, 5), (20, 20)),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn topmost_visual_annotation_is_selected_moved_and_restored_by_history() {
+        let mut editor = EditorState {
+            annotations: vec![
+                Annotation {
+                    shape: Shape::Line((10, 20), (60, 20)),
+                    color: PALETTE[0],
+                },
+                Annotation {
+                    shape: Shape::Mosaic((0, 0), (80, 80)),
+                    color: PALETTE[1],
+                },
+            ],
+            ..EditorState::default()
+        };
+
+        assert_eq!(editor.select_at((30, 20), |_| (0, 0)), Some(0));
+        assert!(editor.begin_transform_at((30, 20)));
+        assert!(editor.update_transform((40, 35)));
+        assert!(editor.commit_transform());
+        assert!(matches!(
+            editor.annotations[0].shape,
+            Shape::Line((20, 35), (70, 35))
+        ));
+
+        assert!(editor.undo());
+        assert!(matches!(
+            editor.annotations[0].shape,
+            Shape::Line((10, 20), (60, 20))
+        ));
+        assert!(editor.redo());
+        assert!(matches!(
+            editor.annotations[0].shape,
+            Shape::Line((20, 35), (70, 35))
+        ));
+    }
+
+    #[test]
+    fn endpoint_and_corner_handles_modify_geometry_as_single_history_steps() {
+        let mut editor = EditorState {
+            annotations: vec![Annotation {
+                shape: Shape::Arrow((10, 10), (50, 10)),
+                color: PALETTE[0],
+            }],
+            selected: Some(0),
+            ..EditorState::default()
+        };
+
+        assert!(editor.begin_transform_at((50, 10)));
+        assert!(editor.update_transform((70, 30)));
+        assert!(editor.commit_transform());
+        assert!(matches!(
+            editor.annotations[0].shape,
+            Shape::Arrow((10, 10), (70, 30))
+        ));
+        assert!(editor.undo());
+
+        editor.annotations = vec![Annotation {
+            shape: Shape::Rect((20, 20), (80, 60)),
+            color: PALETTE[0],
+        }];
+        editor.selected = Some(0);
+        assert!(editor.begin_transform_at((20, 20)));
+        assert!(editor.update_transform((10, 5)));
+        assert!(editor.commit_transform());
+        assert!(matches!(
+            editor.annotations[0].shape,
+            Shape::Rect((10, 5), (80, 60))
+        ));
+    }
+
+    #[test]
+    fn selected_color_delete_and_text_reedit_are_history_operations() {
+        let mut editor = EditorState {
+            annotations: vec![Annotation {
+                shape: Shape::Text((20, 30), "hello".into()),
+                color: PALETTE[0],
+            }],
+            selected: Some(0),
+            ..EditorState::default()
+        };
+
+        assert!(editor.set_color(4));
+        assert_eq!(editor.annotations[0].color, PALETTE[4]);
+        assert!(editor.undo());
+        assert_eq!(editor.annotations[0].color, PALETTE[0]);
+
+        editor.selected = Some(0);
+        assert!(editor.reopen_selected_text());
+        assert!(editor.insert_text(" world"));
+        assert!(editor.commit_text());
+        assert!(matches!(
+            &editor.annotations[0].shape,
+            Shape::Text(_, text) if text == "hello world"
+        ));
+        assert!(editor.undo());
+        assert!(matches!(
+            &editor.annotations[0].shape,
+            Shape::Text(_, text) if text == "hello"
+        ));
+
+        editor.selected = Some(0);
+        assert!(editor.delete_selected());
+        assert!(editor.annotations.is_empty());
+        assert!(editor.undo());
+        assert_eq!(editor.annotations.len(), 1);
     }
 }

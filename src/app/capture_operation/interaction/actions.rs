@@ -3,7 +3,8 @@ use crate::app::capture_operation::CaptureCommand;
 use crate::app::editor::{EditorState, ToolbarAction, ToolbarItem};
 use crate::app::geometry::selection_has_area;
 use crate::app::output::Shape;
-use crate::app::windows_adapter::TEXT_FONT_HEIGHT;
+use crate::app::windows_adapter::{TEXT_FONT_HEIGHT, gdi_text_size};
+use std::time::{Duration, Instant};
 
 impl Interaction {
     pub(in crate::app::capture_operation) fn request_redraw(&mut self) {
@@ -69,12 +70,9 @@ impl Interaction {
         let Some(selection) = self.selection() else {
             return;
         };
-        let editor = EditorState {
-            tool: self.preferred_tool,
-            color: self.preferred_color,
-            ..EditorState::default()
-        };
-        self.phase = super::InteractionPhase::Editing(super::EditingState { selection, editor });
+        let editor = EditorState::with_preferences(self.preferred_tool, self.preferred_color);
+        self.phase =
+            super::InteractionPhase::Editing(Box::new(super::EditingState { selection, editor }));
     }
 
     pub(in crate::app::capture_operation) fn reselect(&mut self) {
@@ -99,16 +97,73 @@ impl Interaction {
 
     pub(in crate::app::capture_operation) fn set_color(&mut self, index: usize) {
         if let Some(editor) = self.editor_mut() {
-            let changed_output = editor.text_editing
-                && editor.annotations.last().is_some_and(|annotation| {
-                    annotation.color != crate::app::editor::PALETTE[index]
-                });
-            editor.set_color(index);
+            let changed_output = editor.set_color(index);
             self.preferred_color = editor.color;
             if changed_output {
                 self.bump_revision();
             }
         }
+    }
+
+    pub(in crate::app::capture_operation) fn select_annotation(
+        &mut self,
+        point: (i32, i32),
+    ) -> bool {
+        let selected = self
+            .editor_mut()
+            .and_then(|editor| editor.select_at(point, gdi_text_size));
+        let now = Instant::now();
+        let double_click = selected.is_some_and(|index| {
+            self.last_select_click
+                .is_some_and(|(previous, previous_index, previous_point)| {
+                    previous_index == index
+                        && now.duration_since(previous) <= Duration::from_millis(500)
+                        && (point.0 - previous_point.0).abs() <= 4
+                        && (point.1 - previous_point.1).abs() <= 4
+                })
+        });
+        self.last_select_click = selected.map(|index| (now, index, point));
+        if double_click
+            && self
+                .editor_mut()
+                .is_some_and(EditorState::reopen_selected_text)
+        {
+            self.last_select_click = None;
+            self.last_blink = None;
+            self.update_ime_area();
+            self.request_redraw();
+            return false;
+        }
+        self.request_redraw();
+        selected.is_some()
+    }
+
+    pub(in crate::app::capture_operation) fn begin_transform(&mut self, point: (i32, i32)) {
+        if let Some(editor) = self.editor_mut() {
+            editor.begin_transform_at(point);
+        }
+    }
+
+    pub(in crate::app::capture_operation) fn update_transform(&mut self, point: (i32, i32)) {
+        if self.last_select_click.is_some_and(|(_, _, start)| {
+            (point.0 - start.0).abs() > 4 || (point.1 - start.1).abs() > 4
+        }) {
+            self.last_select_click = None;
+        }
+        if self
+            .editor_mut()
+            .is_some_and(|editor| editor.update_transform(point))
+        {
+            self.bump_revision();
+            self.request_redraw();
+        }
+    }
+
+    pub(in crate::app::capture_operation) fn commit_transform(&mut self) {
+        if self.editor_mut().is_some_and(EditorState::commit_transform) {
+            self.bump_revision();
+        }
+        self.request_redraw();
     }
 
     pub(in crate::app::capture_operation) fn start_shape(&mut self, point: (i32, i32)) {
@@ -157,7 +212,7 @@ impl Interaction {
 
     pub(in crate::app::capture_operation) fn update_ime_area(&mut self) {
         let Some(editor) = self.editor() else { return };
-        let Some(annotation) = editor.annotations.last() else {
+        let Some(annotation) = editor.text_annotation() else {
             return;
         };
         let Shape::Text((x, y), text) = &annotation.shape else {
@@ -206,9 +261,14 @@ impl Interaction {
                 CaptureCommand::None
             }
             ToolbarItem::Action(ToolbarAction::Undo) => {
-                if let Some(editor) = self.editor_mut()
-                    && editor.annotations.pop().is_some()
-                {
+                if self.editor_mut().is_some_and(EditorState::undo) {
+                    self.bump_revision();
+                }
+                self.request_redraw();
+                CaptureCommand::None
+            }
+            ToolbarItem::Action(ToolbarAction::Redo) => {
+                if self.editor_mut().is_some_and(EditorState::redo) {
                     self.bump_revision();
                 }
                 self.request_redraw();

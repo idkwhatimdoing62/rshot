@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 xcap = "0.9.6"
-mouse_position = "0.1.4"
 global-hotkey = "0.8.0"
 windows = { version = "0.62.2", features = ["Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_HiDpi", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Ole", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_WinRT", "Win32_UI_Shell"] }
 serde = "1.0.228"

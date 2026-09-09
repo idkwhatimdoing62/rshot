@@ -5,12 +5,22 @@ use super::windows_adapter::{TEXT_FONT_HEIGHT, gdi_render_text_rgba, gdi_text_si
 use xcap::image::RgbaImage;
 
 const TOOLBAR_ICON_SIZE: i32 = 20;
+// 工具栏采用中性深色基底，蓝色只表示当前状态/交互，红色只保留给关闭。
+const TOOLBAR_SHADOW: u32 = 0x000B0D10;
+const TOOLBAR_BACKGROUND: u32 = 0x001A2028;
+const TOOLBAR_ITEM: u32 = 0x002B333D;
+const TOOLBAR_HOVER: u32 = 0x003B4A59;
+const TOOLBAR_ACTIVE: u32 = 0x005A8DEE;
+const TOOLBAR_BORDER: u32 = 0x006B7785;
+const TOOLBAR_CLOSE: u32 = 0x00A83D48;
+const TOOLBAR_CLOSE_HOVER: u32 = 0x00D85A65;
 const ICON_PEN: &[u8; 400] = include_bytes!("../../assets/icons/remix/pen.alpha");
 const ICON_LINE: &[u8; 400] = include_bytes!("../../assets/icons/remix/line.alpha");
 const ICON_ARROW: &[u8; 400] = include_bytes!("../../assets/icons/remix/arrow.alpha");
 const ICON_RECT: &[u8; 400] = include_bytes!("../../assets/icons/remix/rect.alpha");
 const ICON_MOSAIC: &[u8; 400] = include_bytes!("../../assets/icons/remix/mosaic.alpha");
 const ICON_TEXT: &[u8; 400] = include_bytes!("../../assets/icons/remix/text.alpha");
+const ICON_SELECT: &[u8; 400] = include_bytes!("../../assets/icons/remix/select.alpha");
 const ICON_COLOR: &[u8; 400] = include_bytes!("../../assets/icons/remix/color.alpha");
 const ICON_UNDO: &[u8; 400] = include_bytes!("../../assets/icons/remix/undo.alpha");
 const ICON_COPY: &[u8; 400] = include_bytes!("../../assets/icons/remix/copy.alpha");
@@ -18,6 +28,22 @@ const ICON_OCR: &[u8; 400] = include_bytes!("../../assets/icons/remix/ocr.alpha"
 const ICON_PIN: &[u8; 400] = include_bytes!("../../assets/icons/remix/pin.alpha");
 const ICON_RESELECT: &[u8; 400] = include_bytes!("../../assets/icons/remix/reselect.alpha");
 const ICON_CLOSE: &[u8; 400] = include_bytes!("../../assets/icons/remix/close.alpha");
+
+const fn horizontal_flip(source: &[u8; 400]) -> [u8; 400] {
+    let mut result = [0; 400];
+    let mut y = 0;
+    while y < 20 {
+        let mut x = 0;
+        while x < 20 {
+            result[y * 20 + (19 - x)] = source[y * 20 + x];
+            x += 1;
+        }
+        y += 1;
+    }
+    result
+}
+
+const ICON_REDO_DATA: [u8; 400] = horizontal_flip(ICON_UNDO);
 
 pub(super) fn toolbar_icon_alpha(item: ToolbarItem) -> &'static [u8; 400] {
     match item {
@@ -27,8 +53,10 @@ pub(super) fn toolbar_icon_alpha(item: ToolbarItem) -> &'static [u8; 400] {
         ToolbarItem::Tool(Tool::Rect) => ICON_RECT,
         ToolbarItem::Tool(Tool::Mosaic) => ICON_MOSAIC,
         ToolbarItem::Tool(Tool::Text) => ICON_TEXT,
+        ToolbarItem::Tool(Tool::Select) => ICON_SELECT,
         ToolbarItem::Color => ICON_COLOR,
         ToolbarItem::Action(ToolbarAction::Undo) => ICON_UNDO,
+        ToolbarItem::Action(ToolbarAction::Redo) => &ICON_REDO_DATA,
         ToolbarItem::Action(ToolbarAction::Copy) => ICON_COPY,
         ToolbarItem::Action(ToolbarAction::Ocr) => ICON_OCR,
         ToolbarItem::Action(ToolbarAction::Pin) => ICON_PIN,
@@ -177,38 +205,31 @@ pub(super) fn draw_toolbar(
             origin.0 + tw + 2,
             origin.1 + th + 3,
         ),
-        0x00101010,
+        TOOLBAR_SHADOW,
     );
     draw_fill_rect(
         buf,
         w,
         h,
         (origin.0, origin.1, origin.0 + tw, origin.1 + th),
-        0x00212631,
+        TOOLBAR_BACKGROUND,
     );
     for slot in 0..TOOLBAR_SLOT_COUNT {
         let rect = toolbar_item_rect(origin, slot);
         let item = toolbar_item(slot);
         let mut fill = match item {
-            ToolbarItem::Tool(t) => {
-                if t == tool {
-                    0x00D88928
-                } else {
-                    0x004B5968
-                }
-            }
-            ToolbarItem::Color => 0x003B78C8,
-            ToolbarItem::Action(ToolbarAction::Copy) => 0x002D9B68,
-            ToolbarItem::Action(ToolbarAction::Ocr) => 0x00704AA3,
-            ToolbarItem::Action(ToolbarAction::Reselect) => 0x006B5AA8,
-            ToolbarItem::Action(ToolbarAction::Pin) => 0x003B78C8,
-            ToolbarItem::Action(ToolbarAction::Undo) => 0x00515D6B,
-            ToolbarItem::Action(ToolbarAction::Close) => 0x00A83D48,
+            ToolbarItem::Action(ToolbarAction::Close) => TOOLBAR_CLOSE,
+            _ => TOOLBAR_ITEM,
         };
+        if matches!(item, ToolbarItem::Tool(t) if t == tool)
+            || matches!(item, ToolbarItem::Color if palette_open)
+        {
+            fill = TOOLBAR_ACTIVE;
+        }
         if hover == Some(slot) {
             fill = match item {
-                ToolbarItem::Action(ToolbarAction::Close) => 0x00D85A65,
-                _ => 0x006D91B5,
+                ToolbarItem::Action(ToolbarAction::Close) => TOOLBAR_CLOSE_HOVER,
+                _ => TOOLBAR_HOVER,
             };
         }
         draw_fill_rect(buf, w, h, rect, fill);
@@ -250,7 +271,7 @@ pub(super) fn draw_toolbar(
             rect.1,
             rect.2 - 1,
             rect.3 - 1,
-            0x00D9E2EC,
+            TOOLBAR_BORDER,
             1,
         );
         match item {
@@ -300,7 +321,7 @@ pub(super) fn draw_palette_popup(
         (popup.0 + 2, popup.1 + 3, popup.2 + 2, popup.3 + 3),
         0x00101010,
     );
-    draw_fill_rect(buf, w, h, popup, 0x00212631);
+    draw_fill_rect(buf, w, h, popup, TOOLBAR_BACKGROUND);
     for (i, swatch) in PALETTE.iter().enumerate() {
         let rect = palette_swatch_rect(popup, i);
         draw_fill_rect(buf, w, h, rect, color_u32(*swatch));
@@ -337,7 +358,7 @@ pub(super) fn draw_palette_popup(
             rect.1,
             rect.2 - 1,
             rect.3 - 1,
-            0x00D9E2EC,
+            TOOLBAR_BORDER,
             1,
         );
     }
@@ -600,5 +621,50 @@ pub(super) fn draw_text_edit_box(
                 1,
             );
         }
+    }
+}
+
+pub(super) fn draw_annotation_selection(buf: &mut [u32], w: u32, h: u32, annotation: &Annotation) {
+    const BLUE: u32 = 0x004C9AFF;
+    type SelectionGeometry = ((i32, i32, i32, i32), Vec<(i32, i32)>);
+    let (bounds, handles): SelectionGeometry = match &annotation.shape {
+        Shape::Pen(points) => {
+            let Some(first) = points.first() else { return };
+            let (mut left, mut top, mut right, mut bottom) = (first.0, first.1, first.0, first.1);
+            for &(x, y) in &points[1..] {
+                left = left.min(x);
+                top = top.min(y);
+                right = right.max(x);
+                bottom = bottom.max(y);
+            }
+            ((left, top, right, bottom), Vec::new())
+        }
+        Shape::Line(start, end) | Shape::Arrow(start, end) => {
+            ((start.0, start.1, end.0, end.1), vec![*start, *end])
+        }
+        Shape::Rect(start, end) | Shape::Mosaic(start, end) => {
+            let (left, top, right, bottom) = normalized_rect((*start, *end));
+            (
+                (left, top, right, bottom),
+                vec![(left, top), (right, top), (left, bottom), (right, bottom)],
+            )
+        }
+        Shape::Text(origin, text) => {
+            let (tw, th) = gdi_text_size(text);
+            (
+                (
+                    origin.0,
+                    origin.1,
+                    origin.0 + tw.max(4),
+                    origin.1 + th.max(4),
+                ),
+                Vec::new(),
+            )
+        }
+    };
+    draw_rect(buf, w, h, bounds.0, bounds.1, bounds.2, bounds.3, BLUE, 1);
+    for (x, y) in handles {
+        draw_fill_rect(buf, w, h, (x - 3, y - 3, x + 4, y + 4), 0x00FFFFFF);
+        draw_rect(buf, w, h, x - 3, y - 3, x + 3, y + 3, BLUE, 1);
     }
 }

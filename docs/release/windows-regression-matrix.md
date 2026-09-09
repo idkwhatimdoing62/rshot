@@ -54,6 +54,7 @@
 | O-01 | Chinese, English and mixed screenshot | Text is copied in reading order | | |
 | O-02 | Model worker unavailable | Windows OCR fallback is reported and remains usable | | |
 | O-03 | OCR timeout or invalid worker result | Session recovers and diagnostics contain an RSH-OCR code | | |
+| O-04 | Windows OCR worker timeout | Worker process is terminated and a subsequent OCR attempt remains usable | | |
 
 ## Clipboard and upgrade
 

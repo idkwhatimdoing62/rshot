@@ -5,14 +5,11 @@ mod worker;
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
 use xcap::image::RgbaImage;
 
 pub(super) use engine::{OcrBackend, OcrFallbackReason, OcrRecognition};
 pub(super) use operation::{OcrEvent, OcrOperation, OcrSessionId};
-
-const WINDOWS_OCR_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(super) struct OcrRequest<'a> {
     pub(super) frozen_image: &'a RgbaImage,
@@ -74,35 +71,30 @@ impl fmt::Display for OcrFailure {
 }
 
 trait RecognitionAdapter {
-    fn recognize(&self, request: &OcrRequest<'_>) -> Result<String, String>;
+    fn recognize(&self, request: &OcrRequest<'_>, cancelled: &AtomicBool)
+    -> Result<String, String>;
 }
 
 struct WorkerAdapter;
 struct WindowsAdapter;
 
 impl RecognitionAdapter for WorkerAdapter {
-    fn recognize(&self, request: &OcrRequest<'_>) -> Result<String, String> {
-        worker::recognize_with_worker(request.frozen_image, request.selection)
+    fn recognize(
+        &self,
+        request: &OcrRequest<'_>,
+        cancelled: &AtomicBool,
+    ) -> Result<String, String> {
+        worker::recognize_with_worker(request.frozen_image, request.selection, cancelled)
     }
 }
 
 impl RecognitionAdapter for WindowsAdapter {
-    fn recognize(&self, request: &OcrRequest<'_>) -> Result<String, String> {
-        let image = request.frozen_image.clone();
-        let selection = request.selection;
-        let (sender, receiver) = mpsc::sync_channel(1);
-        std::thread::Builder::new()
-            .name(String::from("rshot-windows-ocr"))
-            .spawn(move || {
-                let result = super::windows_adapter::WinRtApartment::initialize()
-                    .map_err(|error| format!("无法初始化系统 OCR 线程：{error}"))
-                    .and_then(|_apartment| engine::recognize_image_text_windows(&image, selection));
-                let _ = sender.send(result);
-            })
-            .map_err(|error| format!("无法启动系统 OCR 线程：{error}"))?;
-        receiver
-            .recv_timeout(WINDOWS_OCR_TIMEOUT)
-            .map_err(|_| String::from("系统 OCR 超时"))?
+    fn recognize(
+        &self,
+        request: &OcrRequest<'_>,
+        cancelled: &AtomicBool,
+    ) -> Result<String, String> {
+        worker::recognize_with_windows_worker(request.frozen_image, request.selection, cancelled)
     }
 }
 
@@ -144,6 +136,7 @@ fn recognize_with(
     request: OcrRequest<'_>,
     model: &dyn RecognitionAdapter,
     windows: &dyn RecognitionAdapter,
+    cancelled: &AtomicBool,
 ) -> Result<OcrRecognition, OcrFailure> {
     if !valid_request(&request) {
         return Err(OcrFailure {
@@ -153,7 +146,7 @@ fn recognize_with(
             windows_failure: String::from("选区尺寸无效"),
         });
     }
-    let (model_failure, model_stage, fallback_reason) = match model.recognize(&request) {
+    let (model_failure, model_stage, fallback_reason) = match model.recognize(&request, cancelled) {
         Ok(text) if !text.trim().is_empty() => {
             return Ok(OcrRecognition {
                 text: text.trim().to_owned(),
@@ -172,7 +165,7 @@ fn recognize_with(
         }
     };
     windows
-        .recognize(&request)
+        .recognize(&request, cancelled)
         .map(|text| OcrRecognition {
             text,
             backend: OcrBackend::Windows,
@@ -189,8 +182,11 @@ fn recognize_with(
         })
 }
 
-pub(super) fn recognize(request: OcrRequest<'_>) -> Result<OcrRecognition, OcrFailure> {
-    recognize_with(request, &WorkerAdapter, &WindowsAdapter)
+pub(super) fn recognize(
+    request: OcrRequest<'_>,
+    cancelled: &AtomicBool,
+) -> Result<OcrRecognition, OcrFailure> {
+    recognize_with(request, &WorkerAdapter, &WindowsAdapter, cancelled)
 }
 
 pub(super) fn try_run_process_role() -> Result<bool, String> {
@@ -200,6 +196,10 @@ pub(super) fn try_run_process_role() -> Result<bool, String> {
     }
     if worker::is_ocr_self_test_invocation() {
         worker::run_ocr_self_test()?;
+        return Ok(true);
+    }
+    if worker::is_windows_ocr_self_test_invocation() {
+        worker::run_windows_ocr_self_test()?;
         return Ok(true);
     }
     if worker::is_ocr_worker_invocation() {
@@ -253,7 +253,8 @@ fn run_corpus(manifest: &Path, report: &Path) -> Result<PathBuf, String> {
         let image = xcap::image::open(directory.join(relative))
             .map_err(|error| format!("could not load OCR corpus image {filename}: {error}"))?
             .to_rgba8();
-        let actual = worker::recognize_with_worker(&image, None)?;
+        let cancelled = AtomicBool::new(false);
+        let actual = worker::recognize_with_worker(&image, None, &cancelled)?;
         let normalized = actual.trim().replace("\r\n", "\n");
         if normalized != expected {
             return Err(format!(
@@ -297,6 +298,7 @@ pub(super) use worker::worker_protocol_round_trip;
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::atomic::AtomicBool;
 
     struct RecordingAdapter<'a> {
         calls: &'a Cell<usize>,
@@ -304,10 +306,18 @@ mod tests {
     }
 
     impl RecognitionAdapter for RecordingAdapter<'_> {
-        fn recognize(&self, _request: &OcrRequest<'_>) -> Result<String, String> {
+        fn recognize(
+            &self,
+            _request: &OcrRequest<'_>,
+            _cancelled: &AtomicBool,
+        ) -> Result<String, String> {
             self.calls.set(self.calls.get() + 1);
             self.result.map(str::to_owned).map_err(str::to_owned)
         }
+    }
+
+    fn active() -> AtomicBool {
+        AtomicBool::new(false)
     }
 
     fn request(image: &RgbaImage) -> OcrRequest<'_> {
@@ -332,6 +342,7 @@ mod tests {
                 calls: &windows_calls,
                 result: Ok("windows text"),
             },
+            &active(),
         )
         .unwrap();
 
@@ -356,6 +367,7 @@ mod tests {
                 calls: &windows_calls,
                 result: Ok("fallback"),
             },
+            &active(),
         )
         .unwrap();
 
@@ -381,6 +393,7 @@ mod tests {
                 calls: &calls,
                 result: Ok("fallback"),
             },
+            &active(),
         )
         .unwrap();
 
@@ -405,6 +418,7 @@ mod tests {
                 calls: &calls,
                 result: Ok(""),
             },
+            &active(),
         )
         .unwrap();
 
@@ -426,6 +440,7 @@ mod tests {
                 calls: &calls,
                 result: Err("系统 OCR 识别失败"),
             },
+            &active(),
         )
         .unwrap_err();
 
@@ -455,6 +470,7 @@ mod tests {
                 calls: &calls,
                 result: Ok("windows"),
             },
+            &active(),
         )
         .unwrap_err();
 
