@@ -4,6 +4,7 @@ mod diagnostics;
 mod editor;
 mod geometry;
 mod handler;
+mod long_capture;
 mod ocr;
 mod output;
 mod pinned;
