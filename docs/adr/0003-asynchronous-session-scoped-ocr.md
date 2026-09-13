@@ -1,6 +1,6 @@
 # 0003: Asynchronous session-scoped OCR
 
-Status: Accepted
+Status: Superseded by [ADR-0011](0011-process-isolated-windows-ocr.md)
 
 Traceability: [Issue #10](https://github.com/idkwhatimdoing62/rshot/issues/10), [PR #9](https://github.com/idkwhatimdoing62/rshot/pull/9)
 

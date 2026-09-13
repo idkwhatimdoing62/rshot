@@ -10,8 +10,10 @@ These 20×20 alpha masks are generated from Remix Icon line-style SVGs on its 24
 | Rectangle | `checkbox-blank-line` |
 | Mosaic | `mosaic-fill` |
 | Text | `text` |
+| Select | `hand` |
 | Color | `palette-line` |
 | Undo | `arrow-go-back-line` |
+| Redo | horizontally mirrored `arrow-go-back-line` |
 | Copy | `file-copy-line` |
 | OCR | `character-recognition-line` |
 | Pin | `pushpin-line` |

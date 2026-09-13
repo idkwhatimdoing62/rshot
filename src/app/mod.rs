@@ -4,6 +4,7 @@ mod diagnostics;
 mod editor;
 mod geometry;
 mod handler;
+mod long_capture;
 mod ocr;
 mod output;
 mod pinned;
@@ -702,14 +703,16 @@ mod tests {
         assert_eq!(toolbar_item(3), ToolbarItem::Tool(Tool::Rect));
         assert_eq!(toolbar_item(4), ToolbarItem::Tool(Tool::Mosaic));
         assert_eq!(toolbar_item(5), ToolbarItem::Tool(Tool::Text));
-        assert_eq!(toolbar_item(6), ToolbarItem::Color);
-        assert_eq!(toolbar_item(7), ToolbarItem::Action(ToolbarAction::Undo));
-        assert_eq!(toolbar_item(9), ToolbarItem::Action(ToolbarAction::Ocr));
-        assert_eq!(toolbar_item(12), ToolbarItem::Action(ToolbarAction::Close));
-        assert_eq!(toolbar_item_slot(ToolbarItem::Color), 6);
+        assert_eq!(toolbar_item(6), ToolbarItem::Tool(Tool::Select));
+        assert_eq!(toolbar_item(7), ToolbarItem::Color);
+        assert_eq!(toolbar_item(8), ToolbarItem::Action(ToolbarAction::Undo));
+        assert_eq!(toolbar_item(9), ToolbarItem::Action(ToolbarAction::Redo));
+        assert_eq!(toolbar_item(11), ToolbarItem::Action(ToolbarAction::Ocr));
+        assert_eq!(toolbar_item(14), ToolbarItem::Action(ToolbarAction::Close));
+        assert_eq!(toolbar_item_slot(ToolbarItem::Color), 7);
         assert_eq!(
             toolbar_item_slot(ToolbarItem::Action(ToolbarAction::Ocr)),
-            9
+            11
         );
     }
 

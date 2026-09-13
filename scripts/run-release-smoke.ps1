@@ -38,6 +38,7 @@ function Invoke-Smoke([string]$Argument, [string]$Name) {
 }
 
 Invoke-Smoke '--rshot-ocr-self-test' 'OCR artifact smoke test'
+Invoke-Smoke '--rshot-windows-ocr-self-test' 'Windows OCR worker smoke test'
 Invoke-Smoke '--rshot-clipboard-self-test' 'Clipboard consumer smoke test'
 
 $ocrCorpusReport = Join-Path ([System.IO.Path]::GetTempPath()) "rshot-ocr-corpus-$PID.json"

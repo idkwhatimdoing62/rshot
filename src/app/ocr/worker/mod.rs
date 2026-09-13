@@ -10,6 +10,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use xcap::image::{DynamicImage, Rgba, RgbaImage};
@@ -26,7 +27,9 @@ use windows::Win32::System::JobObjects::{
 };
 
 const OCR_WORKER_ARGUMENT: &str = "--rshot-ocr-worker";
+pub(super) const WINDOWS_OCR_WORKER_ARGUMENT: &str = "--rshot-windows-ocr-worker";
 const OCR_SELF_TEST_ARGUMENT: &str = "--rshot-ocr-self-test";
+pub(super) const WINDOWS_OCR_SELF_TEST_ARGUMENT: &str = "--rshot-windows-ocr-self-test";
 const OCR_WORKER_MAGIC: &[u8; 8] = b"RSHOTOC2";
 const OCR_WORKER_MAX_PIXELS: u64 = 8_000_000;
 const OCR_WORKER_MAX_OUTPUT: usize = 8 * 1024 * 1024;
@@ -85,7 +88,17 @@ pub(in crate::app) fn embedded_character_count() -> usize {
 }
 
 pub(super) fn is_ocr_worker_invocation() -> bool {
-    std::env::args().nth(1).as_deref() == Some(OCR_WORKER_ARGUMENT)
+    std::env::args().nth(1).is_some_and(|argument| {
+        argument == OCR_WORKER_ARGUMENT || argument == WINDOWS_OCR_WORKER_ARGUMENT
+    })
+}
+
+pub(super) fn is_windows_ocr_worker_invocation() -> bool {
+    std::env::args().nth(1).as_deref() == Some(WINDOWS_OCR_WORKER_ARGUMENT)
+}
+
+pub(super) fn is_windows_ocr_self_test_invocation() -> bool {
+    std::env::args().nth(1).as_deref() == Some(WINDOWS_OCR_SELF_TEST_ARGUMENT)
 }
 
 pub(super) fn is_ocr_self_test_invocation() -> bool {
@@ -315,7 +328,13 @@ fn recognize(image: RgbaImage) -> Result<String, String> {
 
 pub(super) fn run_ocr_worker() -> Result<(), String> {
     let image = read_request(std::io::stdin().lock())?;
-    let text = recognize(image)?;
+    let text = if is_windows_ocr_worker_invocation() {
+        let _apartment = crate::app::windows_adapter::WinRtApartment::initialize()
+            .map_err(|error| format!("无法初始化系统 OCR 线程：{error}"))?;
+        super::engine::recognize_image_text_windows(&image, None)?
+    } else {
+        recognize(image)?
+    };
     let mut stdout = std::io::stdout().lock();
     stdout
         .write_all(text.as_bytes())
@@ -326,7 +345,14 @@ pub(super) fn run_ocr_worker() -> Result<(), String> {
 pub(super) fn run_ocr_self_test() -> Result<(), String> {
     let image = RgbaImage::from_pixel(64, 64, Rgba([255, 255, 255, 255]));
     // 走与界面相同的子进程、Job Object、管道、运行时提取和模型推理路径。
-    recognize_with_worker(&image, None).map(|_| ())
+    let cancelled = AtomicBool::new(false);
+    recognize_with_worker(&image, None, &cancelled).map(|_| ())
+}
+
+pub(super) fn run_windows_ocr_self_test() -> Result<(), String> {
+    let image = RgbaImage::from_pixel(64, 64, Rgba([255, 255, 255, 255]));
+    let cancelled = AtomicBool::new(false);
+    recognize_with_windows_worker(&image, None, &cancelled).map(|_| ())
 }
 
 fn read_limited(mut reader: impl Read, limit: usize, label: &str) -> Result<Vec<u8>, String> {
@@ -362,7 +388,28 @@ fn join_worker_thread<T>(
 pub(super) fn recognize_with_worker(
     image: &RgbaImage,
     selection: Option<((i32, i32), (i32, i32))>,
+    cancelled: &AtomicBool,
 ) -> Result<String, String> {
+    recognize_with_worker_mode(image, selection, OCR_WORKER_ARGUMENT, cancelled)
+}
+
+pub(super) fn recognize_with_windows_worker(
+    image: &RgbaImage,
+    selection: Option<((i32, i32), (i32, i32))>,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    recognize_with_worker_mode(image, selection, WINDOWS_OCR_WORKER_ARGUMENT, cancelled)
+}
+
+fn recognize_with_worker_mode(
+    image: &RgbaImage,
+    selection: Option<((i32, i32), (i32, i32))>,
+    worker_argument: &str,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(String::from("OCR 已取消"));
+    }
     let started = Instant::now();
     let (rgba, width, height) =
         prepare_ocr_worker_rgba(image, selection).ok_or_else(|| String::from("选区尺寸无效"))?;
@@ -370,7 +417,7 @@ pub(super) fn recognize_with_worker(
         std::env::current_exe().map_err(|error| format!("无法定位高精度 OCR 进程：{error}"))?;
     let mut command = Command::new(executable);
     command
-        .arg(OCR_WORKER_ARGUMENT)
+        .arg(worker_argument)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -443,8 +490,22 @@ pub(super) fn recognize_with_worker(
         }
     };
 
-    let deadline = started + OCR_WORKER_TIMEOUT;
+    let system_ocr = worker_argument == WINDOWS_OCR_WORKER_ARGUMENT;
+    let deadline = started
+        + if system_ocr {
+            Duration::from_secs(8)
+        } else {
+            OCR_WORKER_TIMEOUT
+        };
     let status = loop {
+        if cancelled.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = join_worker_thread(input_thread, "OCR 输入");
+            let _ = join_worker_thread(output_thread, "OCR 输出");
+            let _ = join_worker_thread(error_thread, "OCR 错误输出");
+            return Err(String::from("OCR 已取消"));
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(OCR_WORKER_POLL_INTERVAL),
@@ -454,7 +515,11 @@ pub(super) fn recognize_with_worker(
                 let _ = join_worker_thread(input_thread, "OCR 输入");
                 let _ = join_worker_thread(output_thread, "OCR 输出");
                 let _ = join_worker_thread(error_thread, "OCR 错误输出");
-                return Err(String::from("高精度 OCR 超过 20 秒，已终止并回退系统 OCR"));
+                return Err(String::from(if system_ocr {
+                    "系统 OCR 超时，已终止识别进程"
+                } else {
+                    "高精度 OCR 超过 20 秒，已终止并回退系统 OCR"
+                }));
             }
             Err(error) => {
                 let _ = child.kill();

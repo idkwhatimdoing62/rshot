@@ -7,6 +7,8 @@ pub(crate) struct CaptureFrame<'a> {
     pub(super) frozen_image: &'a RgbaImage,
     pub(super) selection: Option<((i32, i32), (i32, i32))>,
     pub(super) annotations: &'a [Annotation],
+    pub(super) selected: Option<usize>,
+    pub(super) text_annotation: Option<&'a Annotation>,
     pub(super) editing: bool,
     pub(super) text_editing: bool,
     pub(super) ime_preedit: &'a str,
@@ -32,6 +34,8 @@ impl<'a> CaptureFrame<'a> {
             frozen_image,
             selection,
             annotations,
+            selected: editor.and_then(|editor| editor.selected),
+            text_annotation: editor.and_then(EditorState::text_annotation),
             editing: editor.is_some(),
             text_editing: editor.is_some_and(|editor| editor.text_editing),
             ime_preedit: editor
@@ -62,9 +66,15 @@ pub(super) fn render_frame(buffer: &mut [u32], width: u32, height: u32, frame: &
         frame.selection,
         frame.annotations,
     );
+    if let Some(annotation) = frame
+        .selected
+        .and_then(|index| frame.annotations.get(index))
+    {
+        draw_annotation_selection(buffer, width, height, annotation);
+    }
     if frame.editing {
         if frame.text_editing
-            && let Some(annotation) = frame.annotations.last()
+            && let Some(annotation) = frame.text_annotation
         {
             draw_text_edit_box(
                 buffer,

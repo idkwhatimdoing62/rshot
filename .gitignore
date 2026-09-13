@@ -4,6 +4,7 @@
 /claude
 /docs/*
 !/docs/WORKFLOW.md
+!/docs/LEARNING_GUIDE.md
 !/docs/adr/
 !/docs/adr/*.md
 !/docs/agents/
