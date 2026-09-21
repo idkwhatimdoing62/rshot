@@ -13,7 +13,6 @@ This repository separates durable facts from the temporary process used to chang
 | Release policy | `docs/RELEASE.md` |
 | Version history | `CHANGELOG.md` |
 | Per-release evidence | `docs/release/results/` |
-| Pre-decision research and teaching notes | `docs/research/`, `docs/notes/` |
 | Current change plan and discoveries | GitHub Issue |
 | Exact implementation | Source code, tests and configuration |
 
@@ -37,4 +36,4 @@ Owner Docs describe the accepted current state. GitHub Issues describe how a pro
 
 Name ADRs `NNNN-short-title.md`. Each ADR records Status, Context, Decision, Consequences, Alternatives and Reconsider when. Accepted ADRs are immutable except for clarification; a changed decision creates a new ADR and marks the old one Superseded.
 
-Do not create repository plan or development-log Markdown files. GitHub Issues are the canonical process record; this keeps temporary execution detail out of Owner Docs.
+Do not create repository plan or development-log Markdown files. GitHub Issues are the canonical process record; this keeps temporary execution detail out of Owner Docs. Local scratch under `docs/` is deliberately excluded by `.gitignore` and is never a source of truth: a conclusion counts only after it has been written into an Owner Doc, an ADR, or an Issue.
