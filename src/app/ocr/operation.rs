@@ -50,18 +50,21 @@ impl OcrOperation {
     ) -> Result<Self, String> {
         let image = request.frozen_image.clone();
         let selection = request.selection;
-        Self::start_with(session_id, deadline, move || {
-            recognize(OcrRequest {
-                frozen_image: &image,
-                selection,
-            })
+        Self::start_with(session_id, deadline, move |_cancelled| {
+            recognize(
+                OcrRequest {
+                    frozen_image: &image,
+                    selection,
+                },
+                _cancelled,
+            )
         })
     }
 
     fn start_with(
         session_id: OcrSessionId,
         deadline: Instant,
-        work: impl FnOnce() -> Result<OcrRecognition, OcrFailure> + Send + 'static,
+        work: impl FnOnce(&AtomicBool) -> Result<OcrRecognition, OcrFailure> + Send + 'static,
     ) -> Result<Self, String> {
         let (sender, receiver) = mpsc::sync_channel(1);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -69,7 +72,7 @@ impl OcrOperation {
         std::thread::Builder::new()
             .name(format!("rshot-ocr-session-{}", session_id.0))
             .spawn(move || {
-                let result = work();
+                let result = work(&worker_cancelled);
                 if !worker_cancelled.load(Ordering::Acquire) {
                     let _ = sender.send(result);
                 }
@@ -148,7 +151,7 @@ mod tests {
     fn completed_event_keeps_the_session_id() {
         let now = Instant::now();
         let mut operation =
-            OcrOperation::start_with(OcrSessionId(7), now + Duration::from_secs(1), || {
+            OcrOperation::start_with(OcrSessionId(7), now + Duration::from_secs(1), |_| {
                 Ok(OcrRecognition {
                     text: String::from("text"),
                     backend: OcrBackend::PpOcrV6,
@@ -171,7 +174,7 @@ mod tests {
     #[test]
     fn deadline_emits_timeout_once_and_discards_late_completion() {
         let now = Instant::now();
-        let mut operation = OcrOperation::start_with(OcrSessionId(8), now, || {
+        let mut operation = OcrOperation::start_with(OcrSessionId(8), now, |_| {
             std::thread::sleep(Duration::from_millis(10));
             Ok(OcrRecognition {
                 text: String::from("late"),
@@ -193,7 +196,7 @@ mod tests {
     fn cancellation_emits_once_and_suppresses_worker_result() {
         let now = Instant::now();
         let mut operation =
-            OcrOperation::start_with(OcrSessionId(9), now + Duration::from_secs(1), || {
+            OcrOperation::start_with(OcrSessionId(9), now + Duration::from_secs(1), |_| {
                 std::thread::sleep(Duration::from_millis(10));
                 Ok(OcrRecognition {
                     text: String::from("cancelled"),

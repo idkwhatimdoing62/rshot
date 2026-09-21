@@ -1,8 +1,7 @@
 name: Change proposal
 description: Track a behavior, architecture, or release change through completion
 title: ""
-labels:
-  - needs-triage
+# 新建的提案不打标签：无标签 = 仍在讨论（见 docs/WORKFLOW.md 的 Issue lifecycle）
 body:
   - type: textarea
     id: why

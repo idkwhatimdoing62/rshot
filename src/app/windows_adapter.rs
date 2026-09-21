@@ -84,7 +84,7 @@ impl Drop for WinRtApartment {
 pub(super) const TEXT_FONT_HEIGHT: i32 = 20;
 
 /// 建文字标注用的字体：微软雅黑（覆盖中文），负高度 = 按像素。
-pub(super) unsafe fn create_text_font() -> windows::Win32::Graphics::Gdi::HFONT {
+pub(super) fn create_text_font() -> windows::Win32::Graphics::Gdi::HFONT {
     unsafe {
         CreateFontW(
             -TEXT_FONT_HEIGHT,
@@ -238,6 +238,9 @@ pub(super) fn visible_window_rects() -> Vec<RectI> {
     windows
 }
 
+// SAFETY contract: `lparam` is created by `visible_window_rects` from a live
+// `Vec<RectI>`. `EnumWindows` invokes this callback synchronously and does not
+// retain the pointer after the call returns.
 unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let list = unsafe { &mut *(lparam.0 as *mut Vec<RectI>) };
     unsafe {

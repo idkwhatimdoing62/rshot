@@ -26,7 +26,7 @@ cargo build --release
 .\scripts\run-release-smoke.ps1
 ~~~
 
-GitHub Actions 强制执行前四项及适合无交互 runner 的 OCR、剪贴板烟测。本机交互式 Windows 执行完整烟测和版本化回归矩阵。
+本节是**发布门**：日常改动只跑 `AGENTS.md` 列出的三项，`--release` 与烟测在准备候选版本和 CI 上执行。GitHub Actions 强制执行前四项及适合无交互 runner 的 OCR、剪贴板烟测。本机交互式 Windows 执行完整烟测和版本化回归矩阵。
 
 ## Configuration and data upgrades
 
@@ -41,6 +41,10 @@ GitHub Actions 强制执行前四项及适合无交互 runner 的 OCR、剪贴�
 复制 docs/release/windows-regression-matrix.md 为 docs/release/results/v{version}.md，填写机器、系统、显示器、DPI、结果和 issue。记录必须与 Release 提交一起保存。
 
 正式版本要求所有必测项目为 PASS。候选版本允许明确记录 BLOCKED 或 FAIL，但 Release notes 必须列出对应风险和 issue。
+
+环境不具备不等于进度债：验证机确实无法提供所需显示拓扑的 environment-gated 场景记 `N/A` 而不记 BLOCKED，规则见 [ADR-0012](adr/0012-environment-gated-display-matrix-items.md)。`N/A` 不阻塞正式版提升，但 Release notes 必须写明哪些拓扑仍未验证。
+
+延后不得无声继承：准备新候选版本时，上一份记录里仍未关闭的 `ready-for-human` issue 必须在新记录中逐条出现，并写明本轮为何仍然延后、或已如何解决。同一项连续延过三个候选版本，就必须在「降级为非必测项并记录 ADR」和「先修再发版」之间做一次选择，不允许继续挂在矩阵里。
 
 ## Rollback
 

@@ -203,8 +203,8 @@ struct PreparedFormat {
 
 impl PreparedFormat {
     fn new(kind: PublishedFormat, clipboard_format: u32, bytes: &[u8]) -> Result<Self, String> {
-        let memory = unsafe { global_from_bytes(bytes) }
-            .ok_or_else(|| format!("为 {kind:?} 分配剪贴板内存失败"))?;
+        let memory =
+            global_from_bytes(bytes).ok_or_else(|| format!("为 {kind:?} 分配剪贴板内存失败"))?;
         Ok(Self {
             kind,
             clipboard_format,
@@ -212,7 +212,7 @@ impl PreparedFormat {
         })
     }
 
-    unsafe fn transfer(&mut self) -> Result<(), String> {
+    fn transfer(&mut self) -> Result<(), String> {
         let memory = self.memory.expect("prepared memory must exist");
         unsafe { SetClipboardData(self.clipboard_format, Some(HANDLE(memory.0))) }
             .map_err(|error| format!("写入 {:?} 失败：{error}", self.kind))?;
@@ -309,7 +309,7 @@ impl TransactionBackend for WindowsTransaction {
     }
 
     fn set(&mut self, format: &mut PreparedFormat) -> Result<(), String> {
-        unsafe { format.transfer() }
+        format.transfer()
     }
 
     fn close(&mut self) -> Result<(), String> {
@@ -495,7 +495,7 @@ fn build_hdrop(path: &Path) -> Vec<u8> {
     output
 }
 
-unsafe fn global_from_bytes(data: &[u8]) -> Option<HGLOBAL> {
+fn global_from_bytes(data: &[u8]) -> Option<HGLOBAL> {
     unsafe {
         let memory = GlobalAlloc(GHND, data.len()).ok()?;
         let target = GlobalLock(memory);

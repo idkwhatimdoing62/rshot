@@ -88,9 +88,27 @@ impl Interaction {
                         && self.modifiers.control_key()
                         && self.is_editing()
                     {
-                        editor!(self).annotations.pop();
-                        self.bump_revision();
-                        self.request_redraw();
+                        let action = if self.modifiers.shift_key() {
+                            ToolbarAction::Redo
+                        } else {
+                            ToolbarAction::Undo
+                        };
+                        self.apply_toolbar_item(ToolbarItem::Action(action));
+                        return CaptureCommand::None;
+                    }
+                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyY)
+                        && self.modifiers.control_key()
+                        && self.is_editing()
+                    {
+                        self.apply_toolbar_item(ToolbarItem::Action(ToolbarAction::Redo));
+                        return CaptureCommand::None;
+                    }
+                    if event.physical_key == PhysicalKey::Code(KeyCode::Delete) && self.is_editing()
+                    {
+                        if editor!(self).delete_selected() {
+                            self.bump_revision();
+                            self.request_redraw();
+                        }
                         return CaptureCommand::None;
                     }
                     if event.physical_key == PhysicalKey::Code(KeyCode::KeyB) && self.is_editing() {
@@ -118,6 +136,11 @@ impl Interaction {
                         self.request_redraw();
                         return CaptureCommand::None;
                     }
+                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyV) && self.is_editing() {
+                        editor!(self).tool = Tool::Select;
+                        self.request_redraw();
+                        return CaptureCommand::None;
+                    }
                     if event.physical_key == PhysicalKey::Code(KeyCode::KeyR) && self.is_editing() {
                         self.reselect();
                         return CaptureCommand::None;
@@ -131,6 +154,10 @@ impl Interaction {
                     if let Key::Named(NamedKey::Escape) = event.logical_key {
                         if editor!(self).palette_open {
                             self.close_palette();
+                            self.request_redraw();
+                            return CaptureCommand::None;
+                        }
+                        if editor!(self).selected.take().is_some() {
                             self.request_redraw();
                             return CaptureCommand::None;
                         }
@@ -199,6 +226,8 @@ impl Interaction {
                     if editor!(self).drawing {
                         self.update_draft(self.cursor);
                         self.request_redraw();
+                    } else if editor!(self).tool == Tool::Select {
+                        self.update_transform(self.cursor);
                     } else if hover_changed || palette_changed {
                         self.request_redraw();
                     }
@@ -265,7 +294,11 @@ impl Interaction {
                                     return CaptureCommand::None;
                                 }
                                 if point_in_selection(self.cursor, self.selection()) {
-                                    if editor!(self).tool == Tool::Text {
+                                    if editor!(self).tool == Tool::Select {
+                                        if self.select_annotation(self.cursor) {
+                                            self.begin_transform(self.cursor);
+                                        }
+                                    } else if editor!(self).tool == Tool::Text {
                                         self.start_text(self.cursor);
                                     } else {
                                         editor!(self).drawing = true;
@@ -294,6 +327,8 @@ impl Interaction {
                                     self.commit_draft();
                                     self.request_redraw();
                                     editor!(self).drawing = false;
+                                } else if editor!(self).tool == Tool::Select {
+                                    self.commit_transform();
                                 }
                             }
                         }

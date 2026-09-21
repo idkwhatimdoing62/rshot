@@ -8,7 +8,7 @@ pub(crate) enum Shape {
     Text((i32, i32), String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Annotation {
     pub(crate) shape: Shape,
     pub(crate) color: [u8; 4],

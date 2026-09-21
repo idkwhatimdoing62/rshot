@@ -20,23 +20,20 @@ Owner Docs describe the accepted current state. GitHub Issues describe how a pro
 
 ## Issue lifecycle
 
-1. **Open:** state why the change is needed, its scope, acceptance criteria, known risks and affected Owner Docs. Apply `needs-triage`.
-2. **Ready:** resolve material questions and apply `ready-for-agent` or `ready-for-human`. Use `needs-info` while a required decision is missing.
+1. **Open:** state why the change is needed, its scope, acceptance criteria, known risks and affected Owner Docs. An Issue with no label is still under discussion; that is a valid state.
+2. **Ready:** resolve material questions, then label `ready-for-agent` (executable without a human decision) or `ready-for-human` (needs interactive Windows verification). These two are the whole taxonomy; an outstanding decision stays written in the Issue body instead of getting its own label.
 3. **Implement:** link commits or the PR. Keep discoveries, scope changes and intentionally unfinished work in the Issue rather than only in chat.
 4. **Reconcile:** compare the implementation with every affected Owner Doc. Update facts that changed. Add an ADR when a choice has meaningful alternatives, lasting consequences or a future reevaluation condition.
-5. **Close:** record the delivered result and verification. Move unfinished work to linked Issues. Close only when the checklist below is true; use `wontfix` when the proposal is intentionally rejected.
+5. **Close:** record the delivered result and verification. Move unfinished work to linked Issues. Close only when the checklist below is true. An intentionally rejected proposal also closes, with the reason in its final comment.
 
 ## Closure checklist
 
-- Acceptance criteria are either verified or explicitly moved to a linked follow-up Issue.
-- Required quality commands pass, with interactive gaps linked to a `ready-for-human` Issue.
-- `README.md`, `docs/CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/RELEASE.md` and `CHANGELOG.md` were checked where relevant.
-- Lasting decisions are recorded in `docs/adr/`; superseded ADRs link to their replacements.
-- Discoveries and remaining work are written in the Issue.
-- The final Issue comment links the merged change and states what was verified.
+- Every acceptance-criteria box is checked, or that item has been moved to a linked follow-up Issue. An Issue may not close while its own description still shows unchecked boxes: a stale `- [ ]` states something false about the delivered result.
+- The per-change commands pass and the final Issue comment links the change and states exactly what was verified; interactive gaps get their own `ready-for-human` Issue.
+- Reconciled affected Owner Docs (`README.md`, `docs/CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/RELEASE.md`, `CHANGELOG.md`) and moved durable conclusions into them or into `docs/adr/`, with superseded ADRs linking to their replacements.
 
 ## ADR format
 
 Name ADRs `NNNN-short-title.md`. Each ADR records Status, Context, Decision, Consequences, Alternatives and Reconsider when. Accepted ADRs are immutable except for clarification; a changed decision creates a new ADR and marks the old one Superseded.
 
-Do not create repository plan or development-log Markdown files. GitHub Issues are the canonical process record; this keeps temporary execution detail out of Owner Docs.
+Do not create repository plan or development-log Markdown files. GitHub Issues are the canonical process record; this keeps temporary execution detail out of Owner Docs. Local scratch under `docs/` is deliberately excluded by `.gitignore` and is never a source of truth: a conclusion counts only after it has been written into an Owner Doc, an ADR, or an Issue.

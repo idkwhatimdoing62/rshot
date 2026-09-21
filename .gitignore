@@ -4,7 +4,12 @@
 /claude
 /docs/*
 !/docs/WORKFLOW.md
+!/docs/LEARNING_GUIDE.md
 !/docs/adr/
 !/docs/adr/*.md
 !/docs/agents/
 !/docs/release/
+
+# 文档配图：按 assets/*/prompts.md 本地生成，不入库（仓库刻意不存 >1MB 二进制）
+assets/values-and-change-illustrations/
+assets/immutable-values-and-change-illustrations/
