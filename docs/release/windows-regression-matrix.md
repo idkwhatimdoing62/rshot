@@ -1,6 +1,6 @@
 # Windows release regression matrix
 
-复制本文件到 docs/release/results/v{version}.md。状态只能填写 PASS、FAIL、BLOCKED；每个失败或阻塞项必须链接 GitHub Issue。
+复制本文件到 docs/release/results/v{version}.md。状态只能填写 PASS、FAIL、BLOCKED、N/A。FAIL 和 BLOCKED 必须链接 GitHub Issue；`N/A` 只用于本文件标注 environment-gated 且验证机确实无法提供该拓扑的场景，见 [ADR-0012](../adr/0012-environment-gated-display-matrix-items.md)。
 
 ## Environment
 
@@ -32,8 +32,8 @@
 | C-01 | First hotkey capture after startup | Overlay appears on cursor display with aligned pixels | | |
 | C-02 | Five consecutive captures | Every capture opens once; no stale overlay or lost hotkey | | |
 | C-03 | 100%, 125%, 150%, 200% scale | Selection and output use the same physical pixels | | |
-| C-04 | Two displays with equal scale | Cursor display is captured and overlay matches it | | |
-| C-05 | Two displays with mixed scale and negative coordinates | No offset, crop or diagonal corruption | | |
+| C-04 | Two displays with equal scale (environment-gated) | Cursor display is captured and overlay matches it | | |
+| C-05 | Two displays with mixed scale and negative coordinates (environment-gated) | No offset, crop or diagonal corruption | | |
 | C-06 | Chinese and English IME text annotation | Preedit, commit, backspace and caret behave correctly | | |
 | C-07 | Mosaic annotation | Multiple rectangular regions preview live; zero-area clicks create nothing; Undo removes the newest region; copy and pin match the preview; ordinary annotations render above mosaic | | |
 | C-08 | Arrow annotation and compact toolbar | Arrow direction, zero-length behavior, Undo, copy and pin match the preview; every icon is recognizable and separately clickable; right-click cancels selection and editing | | |
